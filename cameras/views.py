@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 from functools import wraps
 
 from bdh_sdk import is_admin
+from bdh_sdk.rpc import BrokerError
 from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import render
 from django.urls import reverse
@@ -550,12 +551,13 @@ def popup_entities(request):
 
         try:
             states = ha.get_all_states()
-        except ha.HAError as err:
+        except (ha.HAError, BrokerError) as err:
             logger.warning("Pop-ups: HA states unavailable: %s", err)
             return JsonResponse({"error": "Home Assistant unavailable"}, status=503)
         try:
             reg = _ha_registry()
-        except ha.HAError as err:
+        except (ha.HAError, BrokerError) as err:
+            # The registries need the admin-only ha.ws grant; fall back to states only.
             logger.warning("Pop-ups: HA registries unavailable: %s", err)
             reg = {"entities": {}, "devices": {}}
         devices = reg["devices"]

@@ -15,9 +15,19 @@ from .protect_api import (
 )
 
 
+def protect_settings(sites):
+    """``override_settings`` kwargs that configure ``sites`` like the numbered app settings."""
+    out = {}
+    for i in range(1, 10):
+        site = sites[i - 1] if i <= len(sites) else {}
+        for field in ("host", "api_key", "name", "username", "password"):
+            default = f"Site {i}" if field == "name" else ""
+            out[f"BDH_CAMERAS_PROTECT_{field.upper()}_{i}"] = site.get(field, default)
+    return out
+
+
 class CameraConfigTests(TestCase):
     def test_protect_sites_from_env(self):
-        from django.conf import settings
         from . import config
         env = {
             "UNIFI_PROTECT_HOST_1": "10.0.0.1", "UNIFI_PROTECT_API_KEY_1": "k1",
@@ -26,19 +36,11 @@ class CameraConfigTests(TestCase):
             "BDH_CAMERAS_PROTECT_USERNAME_2": "viewer", "BDH_CAMERAS_PROTECT_PASSWORD_2": "pw",
             "UNIFI_PROTECT_HOST_3": "10.0.0.3",  # no key: ignored
         }
-        with self.settings(), patch.dict("os.environ", env):
-            if hasattr(settings, "UNIFI_PROTECT_SITES"):
-                del settings.UNIFI_PROTECT_SITES
+        with patch.dict("os.environ", env):
             self.assertEqual(config.protect_sites(), [
                 {"host": "10.0.0.1", "api_key": "k1", "name": "Site 1", "username": "", "password": ""},
                 {"host": "10.0.0.2", "api_key": "k2", "name": "Shop", "username": "viewer", "password": "pw"},
             ])
-
-    @override_settings(UNIFI_PROTECT_SITES=[{"host": "h", "api_key": "k", "name": "S"}])
-    def test_settings_win(self):
-        from . import config
-        with patch.dict("os.environ", {"UNIFI_PROTECT_HOST_1": "x", "UNIFI_PROTECT_API_KEY_1": "y"}):
-            self.assertEqual(config.protect_sites(), [{"host": "h", "api_key": "k", "name": "S"}])
 
 
 # --- Protect API helper tests ---
@@ -119,7 +121,7 @@ def _mock_post_non_ptz(url, **kwargs):
 
 
 @override_settings(
-    UNIFI_PROTECT_SITES=[{'host': '192.168.10.1', 'api_key': 'test_api_key', 'name': 'Test Site'}],
+    **protect_settings([{'host': '192.168.10.1', 'api_key': 'test_api_key', 'name': 'Test Site'}]),
 )
 class FetchCamerasFromSiteTests(TestCase):
     """Tests for _fetch_cameras_from_site."""
@@ -323,7 +325,7 @@ class FetchCamerasFromSiteTests(TestCase):
 # --- Cache tests ---
 
 @override_settings(
-    UNIFI_PROTECT_SITES=[{'host': '192.168.10.1', 'api_key': 'test_api_key', 'name': 'Test Site'}],
+    **protect_settings([{'host': '192.168.10.1', 'api_key': 'test_api_key', 'name': 'Test Site'}]),
 )
 class ProtectCachingTests(TestCase):
     """Tests for the camera list caching."""
@@ -361,7 +363,7 @@ class ProtectCachingTests(TestCase):
 
         self.assertIsNone(django_cache.get(cache_key))
 
-    @override_settings(UNIFI_PROTECT_SITES=[])
+    @override_settings(**protect_settings([]))
     def test_returns_empty_list_when_no_sites(self):
         """Returns empty list when no sites are configured."""
         result = get_protect_cameras()
@@ -423,7 +425,7 @@ class GetGo2rtcStreamsTests(TestCase):
 
 @override_settings(
     GO2RTC_URL='http://localhost:1984',
-    UNIFI_PROTECT_SITES=[{'host': '192.168.10.1', 'api_key': 'test_api_key', 'name': 'Test Site'}],
+    **protect_settings([{'host': '192.168.10.1', 'api_key': 'test_api_key', 'name': 'Test Site'}]),
 )
 class CameraFeedViewWithProtectTests(TestCase):
     """Tests for camera_feed_view when Protect is configured."""
@@ -576,8 +578,10 @@ class CameraFeedViewWithProtectTests(TestCase):
                  'camera_id': 'c1', 'is_ptz': False, 'ptz_presets': 0},
             ],
         }]
-        with patch("cameras.config.app_setting", side_effect=lambda app, key, default=None, **kw:
-                   "udp" if key == "video_transport" else default):
+        from . import config
+        real = config.app_setting
+        with patch("cameras.config.app_setting", side_effect=lambda app, key, *a, **kw:
+                   "udp" if key == "video_transport" else real(app, key, *a, **kw)):
             page = self.client.get("/cameras/").content.decode()
             popup = self.client.get("/cameras/popup/c1/").content.decode()
         for html in (page, popup):
@@ -660,7 +664,7 @@ def _cam(name, cid, **extra):
 
 @override_settings(
     GO2RTC_URL='http://localhost:1984',
-    UNIFI_PROTECT_SITES=[{'host': '192.168.10.1', 'api_key': 'k', 'name': 'Sun Peaks'}],
+    **protect_settings([{'host': '192.168.10.1', 'api_key': 'k', 'name': 'Sun Peaks'}]),
 )
 class HeroLayoutTests(TestCase):
     """Sites with enough cameras feature the doorbell as a large hero tile."""
@@ -716,10 +720,10 @@ class HeroLayoutTests(TestCase):
 
 @override_settings(
     GO2RTC_URL='http://localhost:1984',
-    UNIFI_PROTECT_SITES=[
+    **protect_settings([
         {'host': '192.168.10.1', 'api_key': 'key1', 'name': 'Sun Peaks'},
         {'host': '192.168.1.26', 'api_key': 'key2', 'name': 'Mercer Island'},
-    ],
+    ]),
 )
 class CameraFeedViewAuthFilterTests(TestCase):
     """Only the primary site is visible to unauthenticated users."""
@@ -812,7 +816,7 @@ class CameraFeedViewAuthFilterTests(TestCase):
 
 @override_settings(
     GO2RTC_URL='http://localhost:1984',
-    UNIFI_PROTECT_SITES=[],
+    **protect_settings([]),
 )
 class CameraFeedViewFallbackTests(TestCase):
     """Tests for camera_feed_view when Protect is NOT configured (fallback)."""
@@ -999,7 +1003,7 @@ class PtzDetectionTests(TestCase):
 
 
 @override_settings(
-    UNIFI_PROTECT_SITES=[{'host': '192.168.10.1', 'api_key': 'test_api_key', 'name': 'Test Site'}],
+    **protect_settings([{'host': '192.168.10.1', 'api_key': 'test_api_key', 'name': 'Test Site'}]),
 )
 class PtzGotoPresetTests(TestCase):
     """Tests for ptz_goto_preset."""
@@ -1041,7 +1045,7 @@ class PtzGotoPresetTests(TestCase):
 
         self.assertFalse(result)
 
-    @override_settings(UNIFI_PROTECT_SITES=[])
+    @override_settings(**protect_settings([]))
     def test_returns_false_when_not_configured(self):
         """Returns False when Protect is not configured."""
         result = ptz_goto_preset('cam1', 0)
@@ -1139,7 +1143,7 @@ class FetchCamerasWithPtzTests(TestCase):
         self.assertEqual(cameras[1]['camera_id'], 'cam_front')
 
     @override_settings(
-        UNIFI_PROTECT_SITES=[{'host': '192.168.10.1', 'api_key': 'k', 'name': 'S'}],
+        **protect_settings([{'host': '192.168.10.1', 'api_key': 'k', 'name': 'S'}]),
     )
     @patch('cameras.protect_api.time.sleep')
     @patch('cameras.protect_api.requests.post')
@@ -1178,7 +1182,7 @@ class FetchCamerasWithPtzTests(TestCase):
 
 @override_settings(
     GO2RTC_URL='http://localhost:1984',
-    UNIFI_PROTECT_SITES=[{'host': '192.168.10.1', 'api_key': 'test_api_key', 'name': 'Test Site'}],
+    **protect_settings([{'host': '192.168.10.1', 'api_key': 'test_api_key', 'name': 'Test Site'}]),
 )
 class PtzGotoViewTests(TestCase):
     """Tests for the ptz_goto view endpoint."""
@@ -1268,7 +1272,7 @@ class RtcDiagViewTests(TestCase):
 
 @override_settings(
     GO2RTC_URL='http://localhost:1984',
-    UNIFI_PROTECT_SITES=[{'host': '192.168.10.1', 'api_key': 'test_api_key', 'name': 'Test Site'}],
+    **protect_settings([{'host': '192.168.10.1', 'api_key': 'test_api_key', 'name': 'Test Site'}]),
 )
 class PtzTemplateTests(TestCase):
     """Tests for PTZ controls in the camera template."""
@@ -1348,10 +1352,10 @@ class PtzTemplateTests(TestCase):
 
 @override_settings(
     GO2RTC_URL='http://localhost:1984',
-    UNIFI_PROTECT_SITES=[
+    **protect_settings([
         {'host': '192.168.10.1', 'api_key': 'key1', 'name': 'Sun Peaks'},
         {'host': '192.168.1.26', 'api_key': 'key2', 'name': 'Mercer Island'},
-    ],
+    ]),
 )
 class MultiSiteTabTests(TestCase):
     """Tests for tabbed multi-site camera display.
@@ -1500,7 +1504,7 @@ def _go2rtc_available():
 @tag('selenium')
 @override_settings(
     GO2RTC_URL=GO2RTC_CI_URL,
-    UNIFI_PROTECT_SITES=[],
+    **protect_settings([]),
 )
 class CameraStreamSeleniumTests(StaticLiveServerTestCase):
     """Selenium smoke tests verifying video-stream elements load via go2rtc.
@@ -2093,10 +2097,10 @@ class EventWorkerStartTests(TestCase):
             env["BDH_CAMERAS_EVENTS"] = "off"
             self.assertFalse(ev_mod.should_start(["daphne"]))
 
-    @override_settings(UNIFI_PROTECT_SITES=[
+    @override_settings(**protect_settings([
         {"host": "h1", "api_key": "k", "name": "A", "username": "u", "password": "p"},
         {"host": "h2", "api_key": "k", "name": "B"},
-    ])
+    ]))
     def test_start_only_sites_with_accounts(self):
         with patch.object(ev_mod, "_workers", {}), patch.object(ev_mod, "_started", False), \
                 patch.object(ev_mod.SiteWorker, "start") as mock_start:
@@ -2284,7 +2288,7 @@ class EventViewTests(TestCase):
 
 @override_settings(
     GO2RTC_URL='http://localhost:1984',
-    UNIFI_PROTECT_SITES=[{'host': '192.168.10.1', 'api_key': 'k', 'name': 'Test Site'}],
+    **protect_settings([{'host': '192.168.10.1', 'api_key': 'k', 'name': 'Test Site'}]),
 )
 class EventTemplateTests(TestCase):
     CAMS = [{'name': 'Test Site', 'host': '192.168.10.1', 'cameras': [
@@ -2617,3 +2621,94 @@ class EventPopupTests(TestCase):
         with patch("cameras.protect_api.get_protect_cameras", return_value=[]), \
                 self.assertLogs("cameras.popups", "WARNING"):
             self.assertEqual(self._publish("hook/person", {}), [])
+
+
+# --- In the app container: everything goes through the hub broker ---
+
+
+class RuntimeStartTests(unittest.TestCase):
+    def test_container_starts_workers(self):
+        with patch.dict("os.environ", {}, clear=False) as env:
+            env.pop("BDH_CAMERAS_EVENTS", None)
+            self.assertTrue(ev_mod.should_start(
+                ["/usr/local/lib/python3.13/site-packages/bdh_sdk/runtime/__main__.py"]))
+            self.assertFalse(ev_mod.should_start(
+                ["/usr/local/lib/python3.13/site-packages/bdh_sdk/runtime/manage.py", "import_app_data"]))
+            self.assertFalse(ev_mod.should_start(["/x/other/__main__.py", "migrate"]))
+
+    def test_tables_ready(self):
+        self.assertTrue(ev_mod.tables_ready())
+
+
+class BrokerTests(TestCase):
+    """The app with ``bdh_sdk.rpc`` pointed at a fake hub broker."""
+
+    def setUp(self):
+        from bdh_sdk import alerts, settings, storage
+        from bdh_sdk.testing import FakeBroker
+
+        saved = (settings._store, storage._backend, alerts._sender, alerts._dismisser)
+
+        def restore():
+            settings.set_store(saved[0])
+            storage.set_state_backend(saved[1])
+            alerts.set_sender(saved[2], saved[3])
+        self.broker = FakeBroker(grants=("settings.*", "state.*", "alerts.*", "events.*",
+                                         "ha.get_all_states"), install=True)
+        self.broker.start()
+        self.addCleanup(restore)
+        self.addCleanup(self.broker.stop)
+        django_cache.clear()
+        self.addCleanup(django_cache.clear)
+        self.addCleanup(popups_mod.stop)
+
+    def test_protect_sites_from_hub_settings(self):
+        from . import config
+        self.broker.settings.update({
+            ("cameras", "protect_host_2"): "10.0.0.2", ("cameras", "protect_api_key_2"): "k",
+            ("cameras", "protect_name_2"): "Shop", ("cameras", "protect_username_2"): "viewer",
+            ("cameras", "protect_password_2"): "pw",
+        })
+        with patch.dict("os.environ", {}) as env:
+            for k in [k for k in env if "PROTECT_" in k]:
+                del env[k]
+            self.assertEqual(config.protect_sites(), [
+                {"host": "10.0.0.2", "api_key": "k", "name": "Shop", "username": "viewer", "password": "pw"}])
+        self.assertIn({"app": "cameras", "key": "protect_host_1"}, self.broker.ops("settings.get"))
+
+    def test_go2rtc_companion_wins(self):
+        from . import config
+        with patch.dict("os.environ", {"BDH_GO2RTC_URL": "http://127.0.0.1:11903"}):
+            self.assertEqual(config.go2rtc_url(), "http://127.0.0.1:11903")
+
+    def test_entity_picker_without_registry_grant(self):
+        self.broker.on("ha.get_all_states", lambda payload: [
+            {"entity_id": "binary_sensor.front_door", "state": "off",
+             "attributes": {"friendly_name": "Front Door", "device_class": "door"}}])
+        with patch("cameras.views.is_admin", return_value=True), \
+                self.assertLogs("cameras.views", "WARNING"):
+            resp = self.client.get("/cameras/settings/popups/entities/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([e["id"] for e in resp.json()["entities"]], ["binary_sensor.front_door"])
+        # Registries need the admin-only ha.ws grant: asked, denied, ignored.
+        self.assertEqual(len(self.broker.ops("ha.ws_commands")), 1)
+
+    def test_trigger_subscribes_and_pushes_alert(self):
+        from bdh_sdk import events, rpc
+        self.broker.state[("cameras", popups_mod.STATE_KEY)] = {
+            "enabled": True,
+            "cameras": {"cam1": {"kinds": [], "triggers": [{"entity_id": "binary_sensor.front_door"}]}}}
+        cams = [{"cameras": [{"camera_id": "cam1", "name": "Front Door"}]}]
+        with patch("cameras.protect_api.get_protect_cameras", return_value=cams):
+            popups_mod.start()
+            self.assertTrue(rpc.flush(5))
+            self.assertEqual(self.broker.ops("events.subscribe")[-1],
+                             {"patterns": ["ha/state/binary_sensor.front_door"]})
+            events.deliver("ha/state/binary_sensor.front_door",
+                           {"entity_id": "binary_sensor.front_door", "old": "off", "new": "on",
+                            "attributes": {"friendly_name": "Front Door", "device_class": "door"}})
+            events.flush(5)
+            self.assertTrue(rpc.flush(5))
+        pushed = self.broker.ops("alerts.push")
+        self.assertEqual([(a["app"], a["key"], a["embed_url"]) for a in pushed],
+                         [("cameras", "doorbell:cam1", "/cameras/popup/cam1/")])

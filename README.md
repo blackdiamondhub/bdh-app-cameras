@@ -7,20 +7,48 @@ installed into the hub through the `blackdiamondhub.plugins` entry point
 
 Page: `/cameras/`.
 
+Since 2.0.0 (`hub_api` 2) the app runs in its own container under
+[bdh-supervisor](https://github.com/blackdiamondlodge/bdh-supervisor), with its
+own SQLite database at `/data`. It reaches the hub only through the broker RPC
+(settings, alerts, Home Assistant state, events). Manifest (`cameras/plugin.py`):
+
+| Field | Value | Why |
+|---|---|---|
+| `permissions` | `alerts`, `ha.read:*`, `events.subscribe:ha/state/#` | Pop-ups, and Home Assistant triggers on any entity. |
+| `network` | `lan` | UniFi Protect (API and websocket) is on the LAN. |
+| `lifecycle` | `always` | The events worker keeps the last 24 hours of detections and fires pop-ups. |
+| `memory_mb` | 96 | About 63 MB in use with the events worker running. |
+| `companions` | `go2rtc` | Live video. The supervisor passes its URL in `BDH_GO2RTC_URL`. |
+
+The go2rtc companion's WebRTC port (8555) is bound on the host, because WebRTC over UDP
+can't go through Docker's port proxy. Only one go2rtc per host can use it, so the hub's own
+go2rtc must be removed when cameras moves to a container.
+
 ## Configuration
 
-Each Protect site `n` (1..9) is configured with environment variables:
+Each Protect site `n` (1..9) is configured with app settings saved on the hub
+(or, as a fallback, environment variables):
 
-| Variable | Purpose |
+| Setting (env var) | Purpose |
 |---|---|
-| `BDH_CAMERAS_PROTECT_HOST_n`, `BDH_CAMERAS_PROTECT_API_KEY_n` | Required. Protect integration API key for live streams and PTZ. |
-| `BDH_CAMERAS_PROTECT_NAME_n` | Site name shown on the tabs. |
-| `BDH_CAMERAS_PROTECT_USERNAME_n`, `BDH_CAMERAS_PROTECT_PASSWORD_n` | Optional local, view-only Protect account. Turns on events and recordings. |
+| `protect_host_n`, `protect_api_key_n` (`BDH_CAMERAS_PROTECT_HOST_n`, `BDH_CAMERAS_PROTECT_API_KEY_n`) | Required. Protect integration API key for live streams and PTZ. |
+| `protect_name_n` (`BDH_CAMERAS_PROTECT_NAME_n`) | Site name shown on the tabs. |
+| `protect_username_n`, `protect_password_n` (`BDH_CAMERAS_PROTECT_USERNAME_n`, `BDH_CAMERAS_PROTECT_PASSWORD_n`) | Optional local, view-only Protect account. Turns on events and recordings. |
 | `BDH_CAMERAS_EVENTS=off` | Don't start the events worker. |
+
+### Moving to a container
+
+1. On the hub, export the app's rows: `python -m bdh_sdk.appdata export cameras -o cameras.json`.
+2. Copy `cameras.json` into the app's data volume, then in the container run
+   `python -m bdh_sdk.runtime.manage import_app_data /data/cameras.json --replace`.
+3. Save the `protect_*_n` settings on the hub (app settings for `cameras`), from the hub's
+   `BDH_CAMERAS_PROTECT_*` / `UNIFI_PROTECT_*` env vars.
+4. Remove the hub's go2rtc and set `BDH_GO2RTC_CANDIDATES` (the hub's LAN `ip:8555`) on the
+   supervisor.
 
 ## Events and recordings
 
-When a site has a Protect account, the hub's server process keeps the last 24 hours of
+When a site has a Protect account, the app's container keeps the last 24 hours of
 detections, using the private Protect API via [uiprotect](https://github.com/uilibs/uiprotect).
 The detections are Doorbell, Person, Vehicle, Package and Animal, plus plain Motion if you turn
 it on. Choose which ones show up in the app's Settings.
@@ -112,6 +140,12 @@ positions share one browser-cached image.
 CI (`.github/workflows/ci.yml`) uses the reusable `app-ci.yml` from
 bdh-sdk. It builds the wheel, installs it next to the hub, then runs
 `hub_smoke`, the app tests and the selenium tests.
+
+The `container-smoke` job runs `scripts/container_smoke.sh`: it starts the wheel in the
+published runtime image (`bdh-app-runtime:hub-api-2`) with a 96 MB limit and a Protect
+account, waits for `/_bdh/health`, checks the logs for import or database errors, and prints
+the container's memory use. Run it locally with `sh scripts/container_smoke.sh dist/*.whl`
+(set `RUNTIME_IMAGE` to test another image).
 
 To release, bump `version` in `pyproject.toml`. When that lands on
 `main`, `release.yml` tags it and publishes the wheel, and the release
