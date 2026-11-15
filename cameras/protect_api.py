@@ -138,6 +138,7 @@ def clear_cache():
     sites = config.protect_sites()
     for site in sites:
         django_cache.delete(f'{CACHE_KEY_PREFIX}{site["host"]}')
+        django_cache.delete(f'{PTZ_CACHE_KEY_PREFIX}{site["host"]}')
     logger.info("Camera cache cleared for %d sites", len(sites))
 
 
@@ -251,6 +252,8 @@ def _find_site_for_camera(camera_id):
 
 
 PTZ_DEFAULT_PRESETS = 4
+PTZ_CACHE_KEY_PREFIX = 'protect_ptz_'
+PTZ_CACHE_TTL = 24 * 3600
 
 
 def _is_ptz_camera(host, api_key, camera_id, camera_type=''):
@@ -267,6 +270,14 @@ def _is_ptz_camera(host, api_key, camera_id, camera_type=''):
     if 'ptz' in (camera_type or '').lower():
         return True
 
+    # A camera's PTZ support never changes, so remember the probe answer and
+    # don't re-probe every camera on each 5-minute refresh (that burst is
+    # what trips Protect's rate limit). clear_cache() forgets these too.
+    cache_key = f'{PTZ_CACHE_KEY_PREFIX}{host}'
+    known = (django_cache.get(cache_key) or {}).get(camera_id)
+    if known is not None:
+        return known
+
     url = f'https://{host}{API_BASE}/cameras/{camera_id}/ptz/goto/1000'
     headers = {'X-API-KEY': api_key}
 
@@ -274,10 +285,14 @@ def _is_ptz_camera(host, api_key, camera_id, camera_type=''):
         resp = _request('post', url, headers=headers, verify=False, timeout=10)
     except requests.RequestException:
         return None
-    if resp.status_code == 404:
-        return True
-    if resp.status_code == 400:
-        return False
+    if resp.status_code in (404, 400):
+        is_ptz = resp.status_code == 404
+        # Probes run in parallel, so a racing write may drop an entry; that
+        # camera is simply probed again next refresh.
+        known = django_cache.get(cache_key) or {}
+        known[camera_id] = is_ptz
+        django_cache.set(cache_key, known, PTZ_CACHE_TTL)
+        return is_ptz
     logger.warning("PTZ probe for camera %s returned %d", camera_id,
                    resp.status_code)
     return None
