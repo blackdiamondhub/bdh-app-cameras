@@ -2286,22 +2286,26 @@ class EventViewTests(TestCase):
         client = MagicMock()
         client.get_camera_snapshot.side_effect = [b"one", b"two", b"three"]
         refreshed = []
+        # _refresh_async runs under _live_lock; record the call and run the
+        # refresh after the request, as the background thread would.
         with patch("cameras.views.events.run", side_effect=lambda cam, fn, **kw: fn(client)), \
                 patch("cameras.frames._ensure_warmer"), \
                 patch("cameras.frames._refresh_async",
-                      side_effect=lambda key, fetch: (refreshed.append(key), frames_mod._refresh(key, fetch))):
+                      side_effect=lambda key, fetch: refreshed.append((key, fetch))):
             c = self._admin()
             first = c.get("/cameras/snapshot/cam1/?w=160")
             cached = c.get("/cameras/snapshot/cam1/?w=160")
             self.assertEqual(refreshed, [])
             frames_mod._live[("cam1", 160)][0] -= frames_mod.LIVE_FRESH + 1
             stale = c.get("/cameras/snapshot/cam1/?w=160")  # served at once, refreshed behind
+            for key, fetch in refreshed:
+                frames_mod._refresh(key, fetch)
             fresh = c.get("/cameras/snapshot/cam1/?w=160")
             frames_mod._live[("cam1", 160)][0] -= frames_mod.LIVE_MAX_AGE + 1
             too_old = c.get("/cameras/snapshot/cam1/?w=160")
         self.assertEqual([r.content for r in (first, cached, stale, fresh, too_old)],
                          [b"one", b"one", b"one", b"two", b"three"])
-        self.assertEqual(refreshed, [("cam1", 160)])
+        self.assertEqual([key for key, _fetch in refreshed], [("cam1", 160)])
         self.assertEqual(first["Cache-Control"], "no-store")
         client.get_camera_snapshot.assert_called_with("cam1", width=160, dt=None)
 
