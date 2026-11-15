@@ -1,0 +1,220 @@
+{% extends 'hub_settings/_layout.html' %}
+
+{% block title %}NVRs · Settings{% endblock %}
+
+{% block section %}
+<style>
+    .nv-row .lbl small { overflow-wrap: anywhere; }
+    .nv-empty { color: var(--mut); padding: 18px 22px; font-size: 14.5px; }
+    .nv-bad { color: var(--red); }
+    .nv-modal { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: flex-start; justify-content: center; z-index: 1055; padding: 6vh 16px calc(16px + var(--hub-kb-h, 0px)); box-sizing: border-box; }
+    .nv-modal.open { display: flex; }
+    .nv-box { background: var(--card); border: 1px solid var(--line); border-radius: 22px; width: min(560px, 100%); max-height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+    .nv-box header { padding: 18px 22px 6px; font-size: 17px; font-weight: 500; }
+    .nv-form { overflow-y: auto; padding: 6px 22px 12px; min-height: 0; }
+    .nv-form label { display: block; margin: 12px 0 0; font-size: 14px; color: var(--mut); }
+    .nv-form input { display: block; width: 100%; box-sizing: border-box; margin-top: 6px; }
+    .nv-form input.err { border-color: var(--red); }
+    .nv-form small { display: block; color: var(--mut); font-size: 12.5px; margin-top: 4px; }
+    .nv-form h4 { margin: 18px 0 0; color: var(--mut); font-size: 12.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+    #nv-msg { min-height: 20px; margin: 12px 0 0; font-size: 14px; color: var(--mut); }
+    #nv-msg.ok { color: #7fd19a; }
+    #nv-msg.bad { color: var(--red); }
+    .nv-foot { border-top: 1px solid var(--line); padding: 14px 22px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .nv-foot .sp { flex: 1; }
+    .nv-hold { position: relative; overflow: hidden; color: var(--red); }
+    .nv-hold::before { content: ""; position: absolute; inset: 0; width: 0; background: rgba(230,91,91,.28); transition: width 0s; }
+    .nv-hold.go::before { width: 100%; transition: width 1.5s linear; }
+    .nv-hold span { position: relative; }
+</style>
+
+{% csrf_token %}
+<div class="hst-head">
+    <div>
+        <h2>NVRs</h2>
+        <p>The UniFi Protect consoles the cameras come from.</p>
+    </div>
+    <div class="act" style="flex-shrink:0"><a class="hst-btn ghost" style="display:flex;align-items:center;white-space:nowrap;text-decoration:none" href="{% url 'hub_settings_app' 'cameras' %}">‹ Cameras settings</a></div>
+</div>
+
+<div class="hst-card" id="nv-list"></div>
+<div style="margin-top:14px"><button type="button" class="hst-btn" id="nv-add">+ Add NVR</button></div>
+
+<div class="nv-modal" id="nv-modal" role="dialog" aria-modal="true" aria-labelledby="nv-title">
+    <div class="nv-box">
+        <header id="nv-title">Add NVR</header>
+        <form class="nv-form" id="nv-form" autocomplete="off" onsubmit="return false">
+            <label>Name<input class="hst-in txt" name="name" maxlength="40" placeholder="Sun Peaks"></label>
+            <label>IP address or host name<input class="hst-in txt" name="host" maxlength="253" placeholder="192.168.1.1" autocapitalize="off" spellcheck="false"></label>
+            <label>API key<input class="hst-in txt" name="api_key" type="password" maxlength="256" autocapitalize="off" spellcheck="false"></label>
+            <small id="nv-key-help">In UniFi Protect: Settings → Control Plane → Integrations → Create API key.</small>
+            <h4>Local account (optional)</h4>
+            <small>Some extras, like PTZ presets, need a local Protect user.</small>
+            <label>Username<input class="hst-in txt" name="username" maxlength="256" autocapitalize="off" spellcheck="false"></label>
+            <label>Password<input class="hst-in txt" name="password" type="password" maxlength="256"></label>
+            <div id="nv-msg" aria-live="polite"></div>
+        </form>
+        <div class="nv-foot">
+            <button type="button" class="hst-btn ghost nv-hold" id="nv-remove"><span>Hold to remove</span></button>
+            <span class="sp"></span>
+            <button type="button" class="hst-btn ghost" id="nv-cancel">Cancel</button>
+            <button type="button" class="hst-btn ghost" id="nv-test">Test</button>
+            <button type="button" class="hst-btn" id="nv-save">Save</button>
+        </div>
+    </div>
+</div>
+
+{{ page|json_script:"nv-data" }}
+<script>
+(function () {
+    const page = JSON.parse(document.getElementById('nv-data').textContent);
+    const csrf = document.querySelector('[name=csrfmiddlewaretoken]').value;
+    const list = document.getElementById('nv-list');
+    const modal = document.getElementById('nv-modal');
+    const form = document.getElementById('nv-form');
+    const msg = document.getElementById('nv-msg');
+    const removeBtn = document.getElementById('nv-remove');
+    const buttons = ['nv-test', 'nv-save', 'nv-cancel'].map(id => document.getElementById(id));
+    let nvrs = page.nvrs, editing = null, busy = false;
+
+    function el(tag, cls, text) {
+        const e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (text != null) e.textContent = text;
+        return e;
+    }
+
+    function render() {
+        list.replaceChildren();
+        if (page.error) { list.append(el('div', 'nv-empty nv-bad', page.error)); return; }
+        if (!nvrs.length) { list.append(el('div', 'nv-empty', 'No NVRs yet. Add one to see its cameras.')); return; }
+        for (const n of nvrs) {
+            const row = el('div', 'hst-row nv-row');
+            const lbl = el('div', 'lbl');
+            lbl.append(el('b', '', n.name));
+            const bits = [n.host];
+            if (n.username) bits.push('local account ' + n.username);
+            const sub = el('small', '', bits.join(' · '));
+            if (!n.has_api_key) sub.append(el('span', 'nv-bad', ' · no API key'));
+            lbl.append(sub);
+            const ctl = el('div', 'ctl');
+            const edit = el('button', 'hst-btn ghost', 'Edit');
+            edit.type = 'button';
+            edit.addEventListener('click', () => open(n));
+            ctl.append(edit);
+            row.append(lbl, ctl);
+            list.append(row);
+        }
+    }
+
+    function say(text, kind) { msg.textContent = text || ''; msg.className = kind || ''; }
+
+    function fields() {
+        const d = {};
+        for (const k of ['name', 'host', 'api_key', 'username', 'password']) d[k] = form.elements[k].value;
+        if (editing) d.id = editing.id;
+        return d;
+    }
+
+    function open(n) {
+        editing = n || null;
+        form.reset();
+        for (const i of form.elements) i.classList.remove('err');
+        say('');
+        document.getElementById('nv-title').textContent = n ? 'Edit ' + n.name : 'Add NVR';
+        if (n) {
+            form.elements.name.value = n.name;
+            form.elements.host.value = n.host;
+            form.elements.username.value = n.username || '';
+        }
+        form.elements.api_key.placeholder = n && n.has_api_key ? 'Saved — leave blank to keep it' : '';
+        form.elements.password.placeholder = n && n.has_password ? 'Saved — leave blank to keep it' : '';
+        removeBtn.style.display = n ? '' : 'none';
+        modal.classList.add('open');
+        form.elements.name.focus();
+    }
+
+    function close() { if (!busy) { modal.classList.remove('open'); editing = null; } }
+
+    async function post(url, body) {
+        const r = await fetch(url, {
+            method: 'POST', credentials: 'same-origin',
+            headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrf},
+            body: JSON.stringify(body),
+        });
+        let data = {};
+        try { data = await r.json(); } catch (e) { data = {error: 'Something went wrong (' + r.status + ').'}; }
+        if (!r.ok && !data.error) data.error = 'Something went wrong (' + r.status + ').';
+        return data;
+    }
+
+    async function run(label, fn) {
+        if (busy) return;
+        busy = true;
+        buttons.forEach(b => b.disabled = true);
+        removeBtn.disabled = true;
+        for (const i of form.elements) i.classList.remove('err');
+        say(label);
+        try { await fn(); }
+        catch (e) { say("Couldn't reach the hub. Try again.", 'bad'); }
+        finally { busy = false; buttons.forEach(b => b.disabled = false); removeBtn.disabled = false; }
+    }
+
+    function fail(data) {
+        say(data.error, 'bad');
+        if (data.field && form.elements[data.field]) {
+            form.elements[data.field].classList.add('err');
+            form.elements[data.field].focus();
+        }
+    }
+
+    document.getElementById('nv-test').addEventListener('click', () => run('Testing…', async () => {
+        const data = await post(page.test_url, fields());
+        if (data.ok) {
+            const c = data.cameras;
+            say('Connected — ' + c + (c === 1 ? ' camera.' : ' cameras.') + (form.elements.username.value ? ' Account signed in.' : ''), 'ok');
+        } else fail(data);
+    }));
+
+    document.getElementById('nv-save').addEventListener('click', () => run('Saving…', async () => {
+        const data = await post(page.save_url, fields());
+        if (data.ok) { nvrs = data.nvrs; render(); busy = false; close(); }
+        else fail(data);
+    }));
+
+    document.getElementById('nv-add').addEventListener('click', () => open(null));
+    document.getElementById('nv-cancel').addEventListener('click', close);
+    modal.addEventListener('click', e => { if (e.target === modal) close(); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && modal.classList.contains('open')) close(); });
+
+    // Hold-to-remove: the fill runs 1.5 s; letting go early cancels.
+    let holdTimer = null;
+    function holdStart(e) {
+        if (busy || !editing) return;
+        if (e && e.preventDefault) e.preventDefault();
+        removeBtn.classList.add('go');
+        holdTimer = setTimeout(() => {
+            holdTimer = null;
+            removeBtn.classList.remove('go');
+            const n = editing;
+            run('Removing…', async () => {
+                const data = await post(page.remove_url, {id: n.id});
+                if (data.ok) { nvrs = data.nvrs; render(); busy = false; close(); }
+                else say(data.error, 'bad');
+            });
+        }, 1500);
+    }
+    function holdStop() {
+        if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+        removeBtn.classList.remove('go');
+    }
+    removeBtn.addEventListener('pointerdown', holdStart);
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => removeBtn.addEventListener(ev, holdStop));
+    removeBtn.addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && !e.repeat && !holdTimer) holdStart(e); });
+    removeBtn.addEventListener('keyup', e => { if (e.key === 'Enter' || e.key === ' ') holdStop(); });
+    removeBtn.addEventListener('contextmenu', e => e.preventDefault());
+
+    render();
+})();
+</script>
+{% endblock %}

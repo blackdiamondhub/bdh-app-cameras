@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -503,6 +504,237 @@ def popup_settings(request):
             "entities_url": reverse("cameras_popup_entities"),
         },
     })
+
+
+_HOST_RE = re.compile(r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?)+(?::\d{1,5})?$|^\[[0-9A-Fa-f:.]+\](?::\d{1,5})?$")
+NVR_NAME_MAX = 40
+NVR_FIELD_MAX = 256
+
+
+def _clean_host(raw):
+    """A host name or IP (optionally with a port); a pasted URL is cut down to its host."""
+    host = str(raw or "").strip()
+    host = re.sub(r"^[a-z][a-z0-9+.-]*://", "", host, flags=re.I).split("/", 1)[0]
+    if not host or len(host) > 253 or not _HOST_RE.match(host):
+        return ""
+    return host
+
+
+def _text(raw, limit=NVR_FIELD_MAX):
+    return str(raw or "").strip()[:limit]
+
+
+def _nvr_rows():
+    """The NVRs for the page: no secrets, only whether each one is set."""
+    sites = {s["id"]: s for s in config.protect_sites()}
+    rows = []
+    for n in config.nvrs():
+        site = sites.get(n["id"])
+        rows.append({
+            "id": n["id"], "name": n.get("name") or n["host"], "host": n["host"],
+            "username": n.get("username", ""),
+            "has_api_key": site is not None,
+            "has_password": bool(site and site.get("password")),
+        })
+    return rows
+
+
+def _nvrs_changed():
+    from . import protect_api
+
+    config.forget_sites()
+    protect_api.clear_cache()
+    try:
+        events.restart()
+    except Exception:
+        logger.exception("Could not restart the Protect events workers")
+
+
+def _json_body(request):
+    try:
+        raw = json.loads(request.body or b"{}")
+    except ValueError:
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+@_settings_admin_only
+def nvr_settings(request):
+    try:
+        rows = _nvr_rows()
+        error = ""
+    except Exception:
+        logger.exception("Could not read the NVRs")
+        rows, error = [], "Couldn't read the NVRs. Try again in a minute."
+    return render(request, "cameras/settings_nvrs.html", {
+        "active": "cameras",
+        "page": {
+            "nvrs": rows, "error": error,
+            "save_url": reverse("cameras_nvr_save"),
+            "remove_url": reverse("cameras_nvr_remove"),
+            "test_url": reverse("cameras_nvr_test"),
+        },
+    })
+
+
+@_settings_admin_only
+@require_POST
+def nvr_save(request):
+    """Add (no ``id``) or edit an NVR. A blank API key or password keeps the saved one."""
+    from bdh_sdk import secrets
+
+    raw = _json_body(request)
+    if raw is None:
+        return JsonResponse({"error": "bad JSON"}, status=400)
+    name = _text(raw.get("name"), NVR_NAME_MAX)
+    host = _clean_host(raw.get("host"))
+    username = _text(raw.get("username"))
+    api_key = _text(raw.get("api_key"))
+    password = str(raw.get("password") or "")[:NVR_FIELD_MAX]
+    if not name:
+        return JsonResponse({"error": "Give it a name.", "field": "name"}, status=400)
+    if not host:
+        return JsonResponse({"error": "Enter the console's IP address or host name.", "field": "host"}, status=400)
+
+    items = config.nvrs()
+    nvr_id = str(raw.get("id") or "")
+    if nvr_id:
+        existing = next((n for n in items if n["id"] == nvr_id), None)
+        if existing is None:
+            return JsonResponse({"error": "That NVR was removed."}, status=404)
+    else:
+        existing = None
+        used = {int(n["id"]) for n in items if str(n["id"]).isdigit()}
+        nvr_id = str(next(i for i in range(1, len(used) + 2) if i not in used))
+    if any(n["host"].lower() == host.lower() and n["id"] != nvr_id for n in items):
+        return JsonResponse({"error": "That console is already added.", "field": "host"}, status=400)
+    if any((n.get("name") or "").lower() == name.lower() and n["id"] != nvr_id for n in items):
+        return JsonResponse({"error": "Another NVR has that name.", "field": "name"}, status=400)
+
+    has_key = bool(secrets.get(config.api_key_secret(nvr_id), "", app="cameras")) if existing else False
+    if not api_key and not has_key:
+        return JsonResponse({"error": "Enter the API key.", "field": "api_key"}, status=400)
+    has_password = bool(secrets.get(config.password_secret(nvr_id), "", app="cameras")) if existing else False
+    if username and not password and not (has_password and existing.get("username") == username):
+        return JsonResponse({"error": "Enter the password for that account.", "field": "password"}, status=400)
+
+    if api_key:
+        secrets.set(config.api_key_secret(nvr_id), api_key, app="cameras")
+    if username and password:
+        secrets.set(config.password_secret(nvr_id), password, app="cameras")
+    elif not username and has_password:
+        secrets.delete(config.password_secret(nvr_id), app="cameras")
+    entry = {"id": nvr_id, "name": name, "host": host, "username": username}
+    if existing:
+        items = [entry if n["id"] == nvr_id else n for n in items]
+    else:
+        items.append(entry)
+    from . import protect_api
+
+    protect_api.clear_cache()  # the old host's cache, before it leaves the list
+    config.save_nvrs(items)
+    _nvrs_changed()
+    return JsonResponse({"ok": True, "nvrs": _nvr_rows()})
+
+
+@_settings_admin_only
+@require_POST
+def nvr_remove(request):
+    from bdh_sdk import secrets
+    from . import protect_api
+
+    raw = _json_body(request)
+    if raw is None:
+        return JsonResponse({"error": "bad JSON"}, status=400)
+    nvr_id = str(raw.get("id") or "")
+    items = config.nvrs()
+    if not any(n["id"] == nvr_id for n in items):
+        return JsonResponse({"error": "That NVR was already removed."}, status=404)
+    protect_api.clear_cache()
+    config.save_nvrs([n for n in items if n["id"] != nvr_id])
+    for name in (config.api_key_secret(nvr_id), config.password_secret(nvr_id)):
+        try:
+            secrets.delete(name, app="cameras")
+        except Exception:
+            logger.exception("Could not delete secret %s", name)
+    _nvrs_changed()
+    return JsonResponse({"ok": True, "nvrs": _nvr_rows()})
+
+
+def _test_login(host, username, password):
+    """True/False for the local account, or None if the console couldn't be reached."""
+    import requests
+
+    try:
+        resp = requests.post(
+            f"https://{host}/api/auth/login",
+            json={"username": username, "password": password, "rememberMe": False},
+            verify=False, timeout=10,
+        )
+    except requests.RequestException:
+        return None
+    if resp.status_code in (400, 401, 403):
+        return False
+    return resp.ok or None
+
+
+@_settings_admin_only
+@require_POST
+def nvr_test(request):
+    """Check a console before saving: the API key lists cameras, the account logs in.
+
+    Blank secrets for a saved NVR (``id``) use the saved ones.
+    """
+    import requests
+    from bdh_sdk import secrets
+    from . import protect_api
+
+    raw = _json_body(request)
+    if raw is None:
+        return JsonResponse({"error": "bad JSON"}, status=400)
+    host = _clean_host(raw.get("host"))
+    if not host:
+        return JsonResponse({"ok": False, "error": "Enter the console's IP address or host name.", "field": "host"})
+    nvr_id = str(raw.get("id") or "")
+    saved = next((n for n in config.nvrs() if n["id"] == nvr_id), None) if nvr_id else None
+    api_key = _text(raw.get("api_key"))
+    if not api_key and saved:
+        api_key = secrets.get(config.api_key_secret(nvr_id), "", app="cameras")
+    if not api_key:
+        return JsonResponse({"ok": False, "error": "Enter the API key.", "field": "api_key"})
+    try:
+        resp = protect_api._request(
+            "get", f"https://{host}{protect_api.API_BASE}/cameras",
+            headers={"X-API-KEY": api_key}, verify=False, timeout=10,
+        )
+    except requests.RequestException:
+        return JsonResponse({"ok": False, "error": f"Couldn't reach {host}.", "field": "host"})
+    if resp.status_code in (401, 403):
+        return JsonResponse({"ok": False, "error": "The console turned down that API key.", "field": "api_key"})
+    if not resp.ok:
+        return JsonResponse({"ok": False, "error": f"The console answered {resp.status_code}. Is it a UniFi Protect console?", "field": "host"})
+    try:
+        data = resp.json()
+    except ValueError:
+        data = None
+    if not isinstance(data, list):
+        return JsonResponse({"ok": False, "error": "That doesn't look like a UniFi Protect console.", "field": "host"})
+
+    result = {"ok": True, "cameras": len(data)}
+    username = _text(raw.get("username"))
+    if username:
+        password = str(raw.get("password") or "")
+        if not password and saved and saved.get("username") == username:
+            password = secrets.get(config.password_secret(nvr_id), "", app="cameras")
+        if not password:
+            result.update(ok=False, error="Enter the password for that account.", field="password")
+        else:
+            login = _test_login(host, username, password)
+            if login is False:
+                result.update(ok=False, error="The console turned down that username or password.", field="password")
+            elif login is None:
+                result.update(ok=False, error="Couldn't sign in to the console with that account.", field="password")
+    return JsonResponse(result)
 
 
 def _ha_registry():

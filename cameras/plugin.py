@@ -36,6 +36,9 @@ spec = PluginSpec(
                      "UDP has lower latency but go2rtc doesn't resend lost packets."),
     ),
     settings_pages=(
+        SettingsPage("NVRs", "cameras_nvrs",
+                     subtitle="The UniFi Protect consoles the cameras come from",
+                     icon="fas fa-server"),
         SettingsPage("Pop-ups", "cameras_popups",
                      subtitle="Which detections and Home Assistant events pop up each camera",
                      icon="fas fa-bell"),
