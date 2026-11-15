@@ -20,16 +20,16 @@ def protect_sites():
     """UniFi Protect sites as dicts with host, api_key, name, username and password.
 
     Sites are the numbered app settings ``protect_{host,api_key,name}_<n>``
-    (saved on the hub, or env ``BDH_CAMERAS_PROTECT_{HOST,API_KEY,NAME}_<n>``,
-    legacy ``UNIFI_PROTECT_{HOST,API_KEY,NAME}_<n>``), n = 1..9; a site needs
+    (saved on the hub, or env ``BDH_CAMERAS_PROTECT_{HOST,API_KEY,NAME}_<n>``),
+    n = 1..9; a site needs
     both a host and an API key. ``protect_{username,password}_<n>`` are an
     optional local Protect account (view only) for events and recordings.
     """
     sites = []
     for i in range(1, MAX_PROTECT_SITES + 1):
-        host = app_setting("cameras", f"protect_host_{i}", "", legacy=(f"UNIFI_PROTECT_HOST_{i}",))
-        api_key = app_setting("cameras", f"protect_api_key_{i}", "", legacy=(f"UNIFI_PROTECT_API_KEY_{i}",))
-        name = app_setting("cameras", f"protect_name_{i}", f"Site {i}", legacy=(f"UNIFI_PROTECT_NAME_{i}",))
+        host = app_setting("cameras", f"protect_host_{i}", "")
+        api_key = app_setting("cameras", f"protect_api_key_{i}", "")
+        name = app_setting("cameras", f"protect_name_{i}", f"Site {i}")
         if host and api_key:
             sites.append({
                 "host": host,

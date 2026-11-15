@@ -42,7 +42,7 @@ Each Protect site `n` (1..9) is configured with app settings saved on the hub
 2. Copy `cameras.json` into the app's data volume, then in the container run
    `python -m bdh_sdk.runtime.manage import_app_data /data/cameras.json --replace`.
 3. Save the `protect_*_n` settings on the hub (app settings for `cameras`), from the hub's
-   `BDH_CAMERAS_PROTECT_*` / `UNIFI_PROTECT_*` env vars.
+   `UNIFI_PROTECT_*` env vars. The app no longer reads `UNIFI_PROTECT_*`.
 4. Remove the hub's go2rtc and set `BDH_GO2RTC_CANDIDATES` (the hub's LAN `ip:8555`) on the
    supervisor.
 
