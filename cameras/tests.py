@@ -966,6 +966,19 @@ class RegisterStreamsTests(TestCase):
 class PtzDetectionTests(TestCase):
     """Tests for PTZ camera detection via safe slot 1000 probe."""
 
+    def setUp(self):
+        clear_cache()
+
+    @patch('cameras.protect_api.requests.post')
+    def test_probe_result_is_cached(self, mock_post):
+        """A camera is probed once; later refreshes reuse the answer."""
+        mock_post.return_value = _make_ptz_not_supported_response()
+
+        self.assertFalse(_is_ptz_camera('192.168.10.1', 'key', 'cam_fixed'))
+        self.assertFalse(_is_ptz_camera('192.168.10.1', 'key', 'cam_fixed'))
+
+        self.assertEqual(mock_post.call_count, 1)
+
     @patch('cameras.protect_api.requests.post')
     def test_detects_ptz_camera(self, mock_post):
         """Returns True when camera responds 404 (preset not found = PTZ)."""
