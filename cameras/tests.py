@@ -1807,7 +1807,14 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
 
-        source = urllib.parse.quote('ffmpeg:virtual?video#video=h264', safe='')
+        # go2rtc names the exec RTSP path after a hash of the ffmpeg command,
+        # so reusing test_cam's exact source makes both producers publish to
+        # the same path at once. The loser breaks test_cam's producer until
+        # go2rtc's 30s exec timeout, failing the next selenium test. A
+        # different size gives test_cam2 its own command and path.
+        source = urllib.parse.quote(
+            'ffmpeg:virtual?video&size=720#video=h264', safe='',
+        )
         req = urllib.request.Request(
             f'{GO2RTC_CI_URL}/api/streams?name=test_cam2&src={source}',
             method='PUT', data=b'',
