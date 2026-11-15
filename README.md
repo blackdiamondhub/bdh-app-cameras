@@ -142,7 +142,8 @@ bdh-sdk. It builds the wheel, installs it next to the hub, then runs
 `hub_smoke`, the app tests and the selenium tests.
 
 Its `image` job locks the dependencies, builds the app's container image the way the platform
-does (bdh-sdk `builder/`, FROM `bdh-app-runtime:hub-api-2`), starts it hardened like the supervisor with a 96 MB limit and an unreachable
+does (bdh-sdk `builder/`, FROM `bdh-app-runtime:hub-api-2`, without PyAV via `[tool.bdh]
+pip_exclude`), starts it hardened like the supervisor with a 96 MB limit and an unreachable
 Protect account, waits for `/_bdh/health` and reports RSS/PSS in the job summary.
 
 To release, bump `version` in `pyproject.toml`. When that lands on `main`, `release.yml` tags it
