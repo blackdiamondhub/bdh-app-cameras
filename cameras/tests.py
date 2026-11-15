@@ -2732,7 +2732,7 @@ class BrokerTests(TestCase):
             storage.set_state_backend(saved[1])
             alerts.set_sender(saved[2], saved[3])
         self.broker = FakeBroker(grants=("settings.*", "state.*", "alerts.*", "events.*", "secrets.*",
-                                         "ha.get_all_states"), install=True)
+                                         "ha.get_all_states"), install=True, app_id="cameras")
         self.broker.start()
         self.addCleanup(restore)
         self.addCleanup(self.broker.stop)
@@ -2783,11 +2783,11 @@ class BrokerTests(TestCase):
 
     def test_nvr_add_edit_remove(self):
         self._nvr_admin()
-        resp = self._post("save", {"name": "Home", "host": "https://10.0.0.1/protect", "api_key": "k1"})
+        resp = self._post("save", {"name": "Home", "host": "https://10.0.0.1/protect", "api_key": "sekrit-key-1"})
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["nvrs"], [{"id": "1", "name": "Home", "host": "10.0.0.1", "username": "",
                                                 "has_api_key": True, "has_password": False}])
-        self.assertEqual(self.broker.secrets[("cameras", "protect_api_key_1")], "k1")
+        self.assertEqual(self.broker.secrets[("cameras", "protect_api_key_1")], "sekrit-key-1")
 
         # A blank key keeps the saved one; an account needs a password.
         resp = self._post("save", {"id": "1", "name": "Home", "host": "10.0.0.1", "username": "view"})
@@ -2795,7 +2795,7 @@ class BrokerTests(TestCase):
         resp = self._post("save", {"id": "1", "name": "House", "host": "10.0.0.1",
                                    "username": "view", "password": "pw"})
         self.assertEqual(resp.json()["nvrs"][0]["has_password"], True)
-        self.assertEqual(self.broker.secrets[("cameras", "protect_api_key_1")], "k1")
+        self.assertEqual(self.broker.secrets[("cameras", "protect_api_key_1")], "sekrit-key-1")
         self.assertEqual(self.broker.secrets[("cameras", "protect_password_1")], "pw")
         # Dropping the account forgets its password.
         self._post("save", {"id": "1", "name": "House", "host": "10.0.0.1"})
@@ -2803,7 +2803,7 @@ class BrokerTests(TestCase):
 
         page = self.client.get("/cameras/settings/nvrs/")
         self.assertContains(page, "House")
-        self.assertNotContains(page, "k1")
+        self.assertNotContains(page, "sekrit-key-1")
 
         resp = self._post("remove", {"id": "1"})
         self.assertEqual(resp.json()["nvrs"], [])
