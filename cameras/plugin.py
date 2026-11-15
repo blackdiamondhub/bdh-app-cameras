@@ -48,6 +48,6 @@ spec = PluginSpec(
     network=NETWORK_LAN,
     # The Protect event workers keep a websocket per site open.
     lifecycle=LIFECYCLE_ALWAYS,
-    memory_mb=96,
+    memory_mb=128,
     companions=("go2rtc",),
 )
