@@ -30,11 +30,12 @@ class CameraConfigTests(TestCase):
     def test_protect_sites_from_env(self):
         from . import config
         env = {
-            "UNIFI_PROTECT_HOST_1": "10.0.0.1", "UNIFI_PROTECT_API_KEY_1": "k1",
+            "BDH_CAMERAS_PROTECT_HOST_1": "10.0.0.1", "BDH_CAMERAS_PROTECT_API_KEY_1": "k1",
             "BDH_CAMERAS_PROTECT_HOST_2": "10.0.0.2", "BDH_CAMERAS_PROTECT_API_KEY_2": "k2",
             "BDH_CAMERAS_PROTECT_NAME_2": "Shop",
             "BDH_CAMERAS_PROTECT_USERNAME_2": "viewer", "BDH_CAMERAS_PROTECT_PASSWORD_2": "pw",
-            "UNIFI_PROTECT_HOST_3": "10.0.0.3",  # no key: ignored
+            "BDH_CAMERAS_PROTECT_HOST_3": "10.0.0.3",  # no key: ignored
+            "UNIFI_PROTECT_HOST_4": "10.0.0.4", "UNIFI_PROTECT_API_KEY_4": "k4",  # legacy: ignored
         }
         with patch.dict("os.environ", env):
             self.assertEqual(config.protect_sites(), [

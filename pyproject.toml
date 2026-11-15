@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bdh-app-cameras"
-version = "2.1.0"
+version = "2.1.1"
 description = "Black Diamond Hub app: live camera feeds via go2rtc and UniFi Protect"
 readme = "README.md"
 license = { text = "MIT" }
@@ -21,12 +21,6 @@ Source = "https://github.com/blackdiamondlodge/bdh-app-cameras"
 
 [project.entry-points."blackdiamondhub.plugins"]
 cameras = "cameras.plugin:spec"
-
-# How the platform builds this app's image (bdh-sdk builder/README.md).
-# uiprotect requires PyAV (~60 MB of FFmpeg) only for talkback/audio, which
-# this app never uses; cameras/events.py imports uiprotect without it.
-[tool.bdh]
-pip_exclude = ["av"]
 
 [tool.setuptools.packages.find]
 include = ["cameras", "cameras.*"]

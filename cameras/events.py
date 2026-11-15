@@ -198,21 +198,6 @@ async def _push_popup(camera_id, camera_name, ttl, kind="doorbell", sound=None):
         logger.exception("Camera pop-up failed")
 
 
-def _without_av():
-    """Let uiprotect import without PyAV (~130 MB on disk, ~16 MB RSS).
-
-    uiprotect imports ``av`` at module level for talkback/streaming, which
-    this app never uses, so its image leaves PyAV out (``[tool.bdh]
-    pip_exclude`` in pyproject.toml).
-    """
-    try:
-        import av  # noqa: F401
-    except ImportError:
-        import sys
-        import types
-        sys.modules.setdefault("av", types.ModuleType("av"))
-
-
 class SiteWorker:
     def __init__(self, site):
         self.site = site["name"]
@@ -279,7 +264,6 @@ class SiteWorker:
             backoff = min(backoff * 2, 600)
 
     async def _connect(self):
-        _without_av()
         from uiprotect import ProtectApiClient
         from uiprotect.data import ModelType
 

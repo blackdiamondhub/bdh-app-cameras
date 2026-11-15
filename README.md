@@ -42,7 +42,7 @@ Each Protect site `n` (1..9) is configured with app settings saved on the hub
 2. Copy `cameras.json` into the app's data volume, then in the container run
    `python -m bdh_sdk.runtime.manage import_app_data /data/cameras.json --replace`.
 3. Save the `protect_*_n` settings on the hub (app settings for `cameras`), from the hub's
-   `BDH_CAMERAS_PROTECT_*` / `UNIFI_PROTECT_*` env vars.
+   `UNIFI_PROTECT_*` env vars. The app no longer reads `UNIFI_PROTECT_*`.
 4. Remove the hub's go2rtc and set `BDH_GO2RTC_CANDIDATES` (the hub's LAN `ip:8555`) on the
    supervisor.
 
@@ -142,8 +142,7 @@ bdh-sdk. It builds the wheel, installs it next to the hub, then runs
 `hub_smoke`, the app tests and the selenium tests.
 
 Its `image` job locks the dependencies, builds the app's container image the way the platform
-does (bdh-sdk `builder/`, FROM `bdh-app-runtime:hub-api-2`, without PyAV via `[tool.bdh]
-pip_exclude`), starts it hardened like the supervisor with a 96 MB limit and an unreachable
+does (bdh-sdk `builder/`, FROM `bdh-app-runtime:hub-api-2`), starts it hardened like the supervisor with a 96 MB limit and an unreachable
 Protect account, waits for `/_bdh/health` and reports RSS/PSS in the job summary.
 
 To release, bump `version` in `pyproject.toml`. When that lands on `main`, `release.yml` tags it
