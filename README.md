@@ -26,14 +26,12 @@ go2rtc must be removed when cameras moves to a container.
 
 ## Configuration
 
-Each Protect site `n` (1..9) is configured with app settings saved on the hub
-(or, as a fallback, environment variables):
+Admins add the UniFi Protect consoles (NVRs) on **Settings → NVRs** (`/cameras/settings/nvrs/`):
+name, host, integration API key (live streams and PTZ) and an optional local, view-only Protect
+account (events and recordings). Keys and passwords are stored as hub secrets.
 
 | Setting (env var) | Purpose |
 |---|---|
-| `protect_host_n`, `protect_api_key_n` (`BDH_CAMERAS_PROTECT_HOST_n`, `BDH_CAMERAS_PROTECT_API_KEY_n`) | Required. Protect integration API key for live streams and PTZ. |
-| `protect_name_n` (`BDH_CAMERAS_PROTECT_NAME_n`) | Site name shown on the tabs. |
-| `protect_username_n`, `protect_password_n` (`BDH_CAMERAS_PROTECT_USERNAME_n`, `BDH_CAMERAS_PROTECT_PASSWORD_n`) | Optional local, view-only Protect account. Turns on events and recordings. |
 | `BDH_CAMERAS_EVENTS=off` | Don't start the events worker. |
 
 ### Moving to a container
@@ -41,8 +39,7 @@ Each Protect site `n` (1..9) is configured with app settings saved on the hub
 1. On the hub, export the app's rows: `python -m bdh_sdk.appdata export cameras -o cameras.json`.
 2. Copy `cameras.json` into the app's data volume, then in the container run
    `python -m bdh_sdk.runtime.manage import_app_data /data/cameras.json --replace`.
-3. Save the `protect_*_n` settings on the hub (app settings for `cameras`), from the hub's
-   `UNIFI_PROTECT_*` env vars. The app no longer reads `UNIFI_PROTECT_*`.
+3. Add the NVRs on **Settings → NVRs**. The app doesn't read `UNIFI_PROTECT_*`.
 4. Remove the hub's go2rtc and set `BDH_GO2RTC_CANDIDATES` (the hub's LAN `ip:8555`) on the
    supervisor.
 
@@ -80,10 +77,7 @@ Admins choose what pops up each camera on **Settings â†’ Pop-ups** (`/camer
 A master switch turns all pop-ups off. Changes apply at once. A pop-up shares one alert per camera,
 so another trigger while it is showing just restarts its timer (`popup_seconds`) without chiming again.
 
-Until the page is first saved, the old settings still apply (and pre-fill the page): a ring pops up
-its doorbell when `doorbell_popup` is on, and when `event_popup` is on each topic in the site's
-`event_popups` (`site.toml` `[apps.cameras]` or JSON in `BDH_CAMERAS_EVENT_POPUPS`) pops up the
-camera it names. Once saved, `event_popups` is ignored and can be removed.
+Until the page is first saved, a ring pops up its doorbell camera.
 
 ## Screen saver
 
