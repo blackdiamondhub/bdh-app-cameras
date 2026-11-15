@@ -2,9 +2,17 @@
 
 {% block title %}Cameras{% endblock %}
 
-{% block extra_head %}{% if keep_open %}<meta name="bdh-screensaver" content="off">{% endif %}{% endblock %}
+{% block extra_head %}{% if keep_open %}<meta name="bdh-screensaver" content="off">{% endif %}
+<style>html { background: #060a10; }</style>{% endblock %}
 
 {% block content %}
+{% if is_admin %}
+{# Set the rail classes before the grid parses so the first paint has the final layout (no reflow). #}
+<script>
+document.body.classList.add('has-rail');
+try { if (localStorage.getItem('cameras.railCollapsed') === '1') document.body.classList.add('rail-collapsed'); } catch (e) {}
+</script>
+{% endif %}
 {% comment %}
 PERFORMANCE: this page runs on UniFi Connect displays (Chrome on a weak GPU) decoding up to
 9 live WebRTC streams at once. Animations that repaint (background-position, box-shadow,
