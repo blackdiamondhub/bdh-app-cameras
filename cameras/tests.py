@@ -2427,25 +2427,6 @@ from . import popups as popups_mod  # noqa: E402
 
 
 class EventPopupConfigTests(TestCase):
-    def test_popup_map_accepts_table_or_json(self):
-        with override_settings(BDH_CAMERAS_EVENT_POPUPS={"ha/state/a.b": "Front Door", "x": ""}):
-            self.assertEqual(popups_mod.popup_map(), {"ha/state/a.b": "Front Door"})
-        with override_settings(BDH_CAMERAS_EVENT_POPUPS='{"hook/door": "Front Door"}'):
-            self.assertEqual(popups_mod.popup_map(), {"hook/door": "Front Door"})
-
-    def test_popup_map_rejects_bad_values(self):
-        for bad in ("{not json", '["a"]', 5):
-            with override_settings(BDH_CAMERAS_EVENT_POPUPS=bad):
-                self.assertEqual(popups_mod.popup_map(), {})
-
-    def test_triggered_only_on_off_to_on(self):
-        self.assertTrue(popups_mod.triggered({"old": "off", "new": "on"}))
-        self.assertFalse(popups_mod.triggered({"old": "on", "new": "off"}))
-        self.assertFalse(popups_mod.triggered({"old": "unavailable", "new": "on"}))
-        self.assertFalse(popups_mod.triggered({"old": "on", "new": "on"}))
-        self.assertTrue(popups_mod.triggered({"anything": 1}))
-        self.assertTrue(popups_mod.triggered(None))
-
     def test_matches_uses_domain_defaults(self):
         m = popups_mod.matches
         door = {"entity_id": "binary_sensor.door"}
@@ -2524,12 +2505,14 @@ class PopupStoredConfigTests(TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    @override_settings(BDH_CAMERAS_DOORBELL_POPUP=True, BDH_CAMERAS_EVENT_POPUPS={
-        "ha/state/binary_sensor.front_door": "front door", "hook/#": "Drive"})
-    def test_legacy_settings_until_saved(self):
+    def test_doorbells_ring_until_saved(self):
         self.assertEqual(popups_mod.camera_kinds("cam1"), ["doorbell"])
         self.assertEqual(popups_mod.current(), {"enabled": True, "cameras": {"cam1": {
-            "kinds": ["doorbell"], "triggers": [{"entity_id": "binary_sensor.front_door"}]}}})
+            "kinds": ["doorbell"], "triggers": []}}})
+        popups_mod.start()
+        self.events.publish("ha/state/binary_sensor.front_door", {"old": "off", "new": "on"})
+        self.events.flush(5)
+        self.assertEqual(self.pushed, [])
 
     def test_saved_triggers_pop_up_their_camera(self):
         popups_mod.start()
@@ -2647,67 +2630,6 @@ class PopupSettingsViewTests(TestCase):
             self.assertEqual(self.client.get("/cameras/settings/popups/entities/").status_code, 503)
 
 
-@override_settings(BDH_CAMERAS_EVENT_POPUPS={
-    "ha/state/binary_sensor.front_door": "front door",
-    "hook/#": "Front Door",
-    "bad/#/x": "Front Door",
-})
-class EventPopupTests(TestCase):
-    def setUp(self):
-        from bdh_sdk import alerts, events
-        self.events = events
-        events.reset()
-        self.pushed = []
-        old = alerts._sender
-        alerts.set_sender(self.pushed.append)
-        self.addCleanup(alerts.set_sender, old)
-        self.addCleanup(events.reset)
-        self.addCleanup(popups_mod.stop)
-        self.enabled = True
-        for target, kw in (
-            ("cameras.config.event_popup", {"side_effect": lambda: self.enabled}),
-            ("cameras.config.popup_seconds", {"return_value": 45}),
-            ("cameras.protect_api.get_protect_cameras", {"return_value": [
-                {"cameras": [{"camera_id": "cam1", "name": "Front Door"}]}]}),
-        ):
-            p = patch(target, **kw)
-            p.start()
-            self.addCleanup(p.stop)
-        with self.assertLogs("cameras.popups", "WARNING"):
-            popups_mod.start()
-
-    def _publish(self, topic, data):
-        self.events.publish(topic, data)
-        self.events.flush(5)
-        return [a.as_dict() for a in self.pushed]
-
-    def test_door_opening_pops_up_camera(self):
-        data = {"entity_id": "binary_sensor.front_door", "old": "off", "new": "on",
-                "attributes": {"friendly_name": "Front Door", "device_class": "door"}}
-        fields = ("app", "key", "title", "embed_url", "ttl")
-        pushed = self._publish("ha/state/binary_sensor.front_door", data)
-        self.assertEqual([{k: a[k] for k in fields} for a in pushed], [{
-            "app": "cameras", "key": "doorbell:cam1", "title": "Front Door opened",
-            "embed_url": "/cameras/popup/cam1/", "ttl": 45,
-        }])
-
-    def test_closing_does_not_pop_up(self):
-        self.assertEqual(self._publish("ha/state/binary_sensor.front_door", {"old": "on", "new": "off"}), [])
-
-    def test_webhook_event_pops_up_with_camera_name(self):
-        pushed = self._publish("hook/person", {"who": "someone"})
-        self.assertEqual([(a["key"], a["title"]) for a in pushed], [("doorbell:cam1", "Front Door")])
-
-    def test_setting_off(self):
-        self.enabled = False
-        self.assertEqual(self._publish("hook/person", {}), [])
-
-    def test_unknown_camera(self):
-        with patch("cameras.protect_api.get_protect_cameras", return_value=[]), \
-                self.assertLogs("cameras.popups", "WARNING"):
-            self.assertEqual(self._publish("hook/person", {}), [])
-
-
 # --- In the app container: everything goes through the hub broker ---
 
 
@@ -2747,13 +2669,12 @@ class BrokerTests(TestCase):
         self.addCleanup(django_cache.clear)
         self.addCleanup(popups_mod.stop)
 
-    def test_nvrs_migrate_from_numbered_settings(self):
+    def test_nvrs_from_state(self):
         from . import config
-        self.broker.settings.update({
-            ("cameras", "protect_host_2"): "10.0.0.2", ("cameras", "protect_name_2"): "Shop",
-            ("cameras", "protect_username_2"): "viewer",
-            ("cameras", "protect_host_3"): "10.0.0.3",  # no key: listed, but not a site
-        })
+        self.broker.state[("cameras", "nvrs")] = [
+            {"id": "2", "host": "10.0.0.2", "name": "Shop", "username": "viewer"},
+            {"id": "3", "host": "10.0.0.3", "name": "Barn", "username": ""},  # no key: listed, but not a site
+            {"id": "4", "host": ""}]
         self.broker.secrets.update({("cameras", "protect_api_key_2"): "k",
                                     ("cameras", "protect_password_2"): "pw"})
         config.forget_sites()
@@ -2762,7 +2683,7 @@ class BrokerTests(TestCase):
             self.assertEqual(config.protect_sites(), [
                 {"id": "2", "host": "10.0.0.2", "api_key": "k", "name": "Shop",
                  "username": "viewer", "password": "pw"}])
-            self.assertEqual([n["id"] for n in self.broker.state[("cameras", "nvrs")]], ["2", "3"])
+            self.assertEqual([n["id"] for n in config.nvrs()], ["2", "3"])
             # Cached: no more secret reads within the minute.
             reads = len(self.broker.ops("secrets.get"))
             config.protect_sites()

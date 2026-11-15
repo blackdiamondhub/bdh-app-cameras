@@ -21,20 +21,15 @@ Only choices that differ from the defaults are stored: ``sounds`` per
 detection kind (see :func:`kind_sound`) and ``sound`` per trigger
 (``TRIGGER_SOUND``).
 
-Until that page is saved the old settings apply: a ring pops up its doorbell
-camera when ``doorbell_popup`` is on, and when ``event_popup`` is on each topic
-in ``event_popups`` pops up the camera it names.
+Until that page is saved, a ring pops up its doorbell camera.
 
 Pop-ups use the doorbell's alert key, so a new trigger while one is showing
 just restarts its timer.
 """
-import json
 import logging
 import re
 
 from django.db import close_old_connections
-
-from bdh_sdk.settings import app_setting
 
 from . import config
 
@@ -61,21 +56,6 @@ _NO_STATE = {None, "", "unavailable", "unknown"}
 _ENTITY_ID = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 _subscriptions = []
 _started = False
-
-
-def popup_map():
-    """Legacy ``{topic pattern: camera name}`` from ``event_popups`` (a table or a JSON string)."""
-    raw = app_setting("cameras", "event_popups", {})
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw) if raw.strip() else {}
-        except ValueError:
-            logger.warning("event_popups is not valid JSON; no event pop-ups")
-            return {}
-    if not isinstance(raw, dict):
-        logger.warning("event_popups must map topics to camera names; no event pop-ups")
-        return {}
-    return {str(topic): str(name) for topic, name in raw.items() if name}
 
 
 def kind_sound(kind):
@@ -138,27 +118,18 @@ def _all_cameras():
     return [cam for site in get_protect_cameras() for cam in site.get("cameras", [])]
 
 
-def legacy_config():
-    """The old settings expressed as a pop-up config (to pre-fill the settings page)."""
-    cams = _all_cameras()
-    cameras = {}
-    if config.doorbell_popup():
-        for cam in cams:
-            if cam.get("is_doorbell"):
-                cameras[cam["camera_id"]] = {"kinds": ["doorbell"], "triggers": []}
-    if config.event_popup():
-        for topic, name in popup_map().items():
-            cam = find_camera(name, cams)
-            if cam is None or not topic.startswith("ha/state/"):
-                continue
-            entry = cameras.setdefault(cam["camera_id"], {"kinds": [], "triggers": []})
-            entry["triggers"].append({"entity_id": topic[len("ha/state/"):]})
+def default_config():
+    """The config before the settings page is saved: doorbells pop up on a ring."""
+    cameras = {
+        cam["camera_id"]: {"kinds": ["doorbell"], "triggers": []}
+        for cam in _all_cameras() if cam.get("is_doorbell")
+    }
     return clean({"enabled": True, "cameras": cameras})
 
 
 def current():
-    """The pop-up config in effect: saved, else the legacy settings."""
-    return stored() or legacy_config()
+    """The pop-up config in effect: saved, else the default."""
+    return stored() or default_config()
 
 
 def save(raw):
@@ -175,7 +146,7 @@ def camera_kinds(camera_id):
     """Protect detection kinds that pop up ``camera_id`` (reads the database)."""
     cfg = stored()
     if cfg is None:
-        return ["doorbell"] if config.doorbell_popup() else []
+        return ["doorbell"]
     if not cfg["enabled"]:
         return []
     return cfg["cameras"].get(camera_id, {}).get("kinds", [])
@@ -186,13 +157,6 @@ def camera_sound(camera_id, kind):
     cfg = stored()
     sounds = (cfg["cameras"].get(camera_id, {}).get("sounds", {}) if cfg else {})
     return sounds.get(kind, kind_sound(kind))
-
-
-def triggered(data):
-    """Legacy ``event_popups`` rule: off to on, or any event that isn't a state change."""
-    if isinstance(data, dict) and "new" in data:
-        return data.get("old") == "off" and data.get("new") == "on"
-    return True
 
 
 def matches(trigger, data):
@@ -211,15 +175,6 @@ def matches(trigger, data):
         return False
     want = trigger.get("to") or DEFAULT_TO.get(domain)
     return want is None or new == want
-
-
-def find_camera(name, cams=None):
-    """The Protect camera named ``name`` (case-insensitive), or None."""
-    wanted = name.strip().lower()
-    for cam in _all_cameras() if cams is None else cams:
-        if (cam.get("name") or "").strip().lower() == wanted:
-            return cam
-    return None
 
 
 def _camera_by_id(camera_id):
@@ -241,27 +196,25 @@ def title_for(data, camera_name):
     return label
 
 
-def handle(event, trigger=None, camera_id=None, camera_name=None):
-    """Pop up a camera for ``event``: by id for saved triggers, by name for legacy ones."""
-    if not (matches(trigger, event.data) if trigger else triggered(event.data)):
+def handle(event, trigger, camera_id):
+    """Pop up camera ``camera_id`` when ``event`` fires ``trigger``."""
+    if not matches(trigger, event.data):
         return
     close_old_connections()
     try:
-        if not camera_id and not config.event_popup():
-            return
-        cam = _camera_by_id(camera_id) if camera_id else find_camera(camera_name or "")
+        cam = _camera_by_id(camera_id)
         if cam is None:
-            logger.warning("Event %s: no camera %r", event.topic, camera_id or camera_name)
+            logger.warning("Event %s: no camera %r", event.topic, camera_id)
             return
         from bdh_sdk import alerts
 
         alerts.push(alerts.Alert(
             app="cameras",
             key=f"doorbell:{cam['camera_id']}",
-            title=title_for(event.data, cam.get("name") or camera_name or ""),
+            title=title_for(event.data, cam.get("name") or ""),
             embed_url=f"/cameras/popup/{cam['camera_id']}/",
             ttl=config.popup_seconds(),
-            sound=(trigger or {}).get("sound", TRIGGER_SOUND),
+            sound=trigger.get("sound", TRIGGER_SOUND),
         ))
     except Exception:
         logger.exception("Event pop-up for %s failed", event.topic)
@@ -272,18 +225,13 @@ def handle(event, trigger=None, camera_id=None, camera_name=None):
 def _targets():
     """``(topic pattern, handler kwargs)`` for every trigger in effect."""
     cfg = stored()
-    if cfg is not None:
-        if not cfg["enabled"]:
-            return []
-        return [
-            (f"ha/state/{trig['entity_id']}", {"trigger": trig, "camera_id": camera_id})
-            for camera_id, cam in cfg["cameras"].items()
-            for trig in cam["triggers"]
-        ]
-    if not config.event_popup():
+    if cfg is None or not cfg["enabled"]:
         return []
-    # Legacy topics are resolved to cameras by name when they fire.
-    return [(pattern, {"camera_name": name}) for pattern, name in popup_map().items()]
+    return [
+        (f"ha/state/{trig['entity_id']}", {"trigger": trig, "camera_id": camera_id})
+        for camera_id, cam in cfg["cameras"].items()
+        for trig in cam["triggers"]
+    ]
 
 
 def start():

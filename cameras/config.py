@@ -5,8 +5,6 @@ import time
 
 from bdh_sdk.settings import app_setting, as_bool
 
-MAX_PROTECT_SITES = 9
-
 
 def go2rtc_url():
     """go2rtc API URL.
@@ -33,38 +31,15 @@ def password_secret(nvr_id):
     return f"protect_password_{nvr_id}"
 
 
-def _migrate_numbered():
-    """The NVRs from the old numbered settings ``protect_{host,name,username}_<n>``.
-
-    Their ids are the old numbers, so the secrets ``protect_api_key_<n>`` and
-    ``protect_password_<n>`` (already in the hub's vault) keep working.
-    """
-    out = []
-    for i in range(1, MAX_PROTECT_SITES + 1):
-        host = app_setting("cameras", f"protect_host_{i}", "")
-        if host:
-            out.append({
-                "id": str(i),
-                "host": host,
-                "name": app_setting("cameras", f"protect_name_{i}", "") or f"Site {i}",
-                "username": app_setting("cameras", f"protect_username_{i}", ""),
-            })
-    return out
-
-
 def nvrs():
     """The UniFi Protect consoles (NVRs) set up on the NVRs settings page.
 
     A list of ``{id, name, host, username}``; the API key and password are
-    secrets. The first read moves the old numbered settings over.
+    secrets.
     """
     from bdh_sdk.storage import app_state
 
-    state = app_state("cameras")
-    raw = state.get(NVRS_KEY)
-    if raw is None:
-        raw = _migrate_numbered()
-        state.set(NVRS_KEY, raw)
+    raw = app_state("cameras").get(NVRS_KEY) or []
     return [n for n in raw if isinstance(n, dict) and n.get("id") and n.get("host")]
 
 
@@ -131,14 +106,6 @@ def enabled_event_kinds():
         k for k in EVENT_KINDS
         if app_setting("cameras", f"show_{k}", EVENT_KIND_DEFAULTS[k], cast=as_bool)
     ]
-
-
-def doorbell_popup():
-    return app_setting("cameras", "doorbell_popup", True, cast=as_bool)
-
-
-def event_popup():
-    return app_setting("cameras", "event_popup", True, cast=as_bool)
 
 
 def keep_open():
