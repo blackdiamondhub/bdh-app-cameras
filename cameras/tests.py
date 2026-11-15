@@ -940,6 +940,26 @@ class RegisterStreamsTests(TestCase):
         # Should not raise
         _register_streams_with_go2rtc('http://localhost:1984', cameras)
 
+    @patch("cameras.views.urllib.request.urlopen")
+    def test_config_file_disabled_is_not_a_failure(self, mock_urlopen):
+        """go2rtc's 'config file disabled' 400 means the stream was created."""
+        import io
+        from .views import _put_stream
+
+        def http_400(body):
+            def raise_(*_a, **_k):
+                raise urllib.error.HTTPError(
+                    'u', 400, 'Bad Request', {}, io.BytesIO(body))
+            return raise_
+
+        mock_urlopen.side_effect = http_400(b'config file disabled\n')
+        with self.assertNoLogs('cameras.views', level='WARNING'):
+            _put_stream('http://localhost:1984', 'front_door', 'rtsps://x')
+
+        mock_urlopen.side_effect = http_400(b'invalid source\n')
+        with self.assertLogs('cameras.views', level='WARNING'):
+            _put_stream('http://localhost:1984', 'front_door', 'rtsps://x')
+
 
 # --- PTZ API tests ---
 

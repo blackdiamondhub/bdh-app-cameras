@@ -109,6 +109,16 @@ def _put_stream(go2rtc_url, name, rtsp_url):
         req = urllib.request.Request(url, method='PUT', data=b'')
         with urllib.request.urlopen(req, timeout=5):
             pass
+    except urllib.error.HTTPError as e:
+        # go2rtc creates the stream in memory, then fails to persist it
+        # because the companion runs without a config file.
+        body = e.read().decode('utf-8', 'replace')
+        if e.code == 400 and 'config file disabled' in body:
+            return
+        logger.warning(
+            "Failed to register stream %s with go2rtc: %s %s",
+            name, e, body.strip(),
+        )
     except (urllib.error.URLError, OSError) as e:
         logger.warning(
             "Failed to register stream %s with go2rtc: %s", name, e,
