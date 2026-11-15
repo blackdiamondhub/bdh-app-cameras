@@ -128,7 +128,9 @@ class FetchCamerasFromSiteTests(TestCase):
     """Tests for _fetch_cameras_from_site."""
 
     def setUp(self):
-        clear_cache()
+        # clear_cache() only covers configured sites; these tests probe
+        # unconfigured hosts, so wipe everything (incl. cached PTZ answers).
+        django_cache.clear()
 
     @patch('cameras.protect_api.requests.post')
     @patch('cameras.protect_api.requests.get')
@@ -967,7 +969,9 @@ class PtzDetectionTests(TestCase):
     """Tests for PTZ camera detection via safe slot 1000 probe."""
 
     def setUp(self):
-        clear_cache()
+        # clear_cache() only covers configured sites; these tests probe
+        # unconfigured hosts, so wipe everything (incl. cached PTZ answers).
+        django_cache.clear()
 
     @patch('cameras.protect_api.requests.post')
     def test_probe_result_is_cached(self, mock_post):
@@ -1091,7 +1095,9 @@ class FetchCamerasWithPtzTests(TestCase):
     """Tests for auto-detected PTZ info in _fetch_cameras_from_site results."""
 
     def setUp(self):
-        clear_cache()
+        # clear_cache() only covers configured sites; these tests probe
+        # unconfigured hosts, so wipe everything (incl. cached PTZ answers).
+        django_cache.clear()
 
     @patch('cameras.protect_api.requests.post')
     @patch('cameras.protect_api.requests.get')
