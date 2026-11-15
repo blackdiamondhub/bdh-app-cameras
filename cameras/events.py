@@ -238,9 +238,28 @@ class SiteWorker:
         self._thread.start()
 
     def _run_thread(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        self.loop.run_until_complete(self._main())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._task = loop.create_task(self._main())
+        self.loop = loop
+        try:
+            loop.run_until_complete(self._task)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self.loop = None
+            loop.close()
+            self._db_pool.shutdown(wait=False)
+
+    def stop(self):
+        """Disconnect and end the worker's thread (returns without waiting)."""
+        loop, task = self.loop, getattr(self, "_task", None)
+        self.client = None
+        if loop is not None and task is not None:
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                pass  # the loop already closed
 
     async def _in_db(self, fn, *args):
         return await asyncio.get_running_loop().run_in_executor(self._db_pool, fn, *args)
@@ -462,3 +481,20 @@ def start():
             worker.start()
         if not _workers:
             logger.info("No Protect accounts configured; camera events are off")
+
+
+def restart():
+    """Stop the workers and start them again from the current NVR list.
+
+    Only when they were started (so not in tests or management commands).
+    """
+    global _started
+    with _start_lock:
+        if not _started:
+            return
+        old = list(_workers.values())
+        _workers.clear()
+        _started = False
+    for worker in old:
+        worker.stop()
+    start()

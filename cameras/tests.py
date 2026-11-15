@@ -26,22 +26,35 @@ def protect_settings(sites):
     return out
 
 
-class CameraConfigTests(TestCase):
-    def test_protect_sites_from_env(self):
-        from . import config
-        env = {
-            "BDH_CAMERAS_PROTECT_HOST_1": "10.0.0.1", "BDH_CAMERAS_PROTECT_API_KEY_1": "k1",
-            "BDH_CAMERAS_PROTECT_HOST_2": "10.0.0.2", "BDH_CAMERAS_PROTECT_API_KEY_2": "k2",
-            "BDH_CAMERAS_PROTECT_NAME_2": "Shop",
-            "BDH_CAMERAS_PROTECT_USERNAME_2": "viewer", "BDH_CAMERAS_PROTECT_PASSWORD_2": "pw",
-            "BDH_CAMERAS_PROTECT_HOST_3": "10.0.0.3",  # no key: ignored
-            "UNIFI_PROTECT_HOST_4": "10.0.0.4", "UNIFI_PROTECT_API_KEY_4": "k4",  # legacy: ignored
-        }
-        with patch.dict("os.environ", env):
-            self.assertEqual(config.protect_sites(), [
-                {"host": "10.0.0.1", "api_key": "k1", "name": "Site 1", "username": "", "password": ""},
-                {"host": "10.0.0.2", "api_key": "k2", "name": "Shop", "username": "viewer", "password": "pw"},
-            ])
+def _sites_from_test_settings():
+    """Stand-in for ``config.protect_sites`` that reads :func:`protect_settings` overrides."""
+    from django.conf import settings as dj
+
+    out = []
+    for i in range(1, 10):
+        def get(field, i=i):
+            return getattr(dj, f"BDH_CAMERAS_PROTECT_{field.upper()}_{i}", "")
+        if get("host") and get("api_key"):
+            out.append({"id": str(i), "host": get("host"), "api_key": get("api_key"),
+                        "name": get("name") or f"Site {i}", "username": get("username"),
+                        "password": get("password")})
+    return out
+
+
+from . import config as _config_mod  # noqa: E402
+
+_real_protect_sites = _config_mod.protect_sites
+_sites_patch = patch.object(_config_mod, "protect_sites", _sites_from_test_settings)
+
+
+def setUpModule():
+    # The real sites come from app state and the vault (see NvrSettingsTests);
+    # the rest of this file configures sites with ``protect_settings``.
+    _sites_patch.start()
+
+
+def tearDownModule():
+    _sites_patch.stop()
 
 
 # --- Protect API helper tests ---
@@ -2718,7 +2731,7 @@ class BrokerTests(TestCase):
             settings.set_store(saved[0])
             storage.set_state_backend(saved[1])
             alerts.set_sender(saved[2], saved[3])
-        self.broker = FakeBroker(grants=("settings.*", "state.*", "alerts.*", "events.*",
+        self.broker = FakeBroker(grants=("settings.*", "state.*", "alerts.*", "events.*", "secrets.*",
                                          "ha.get_all_states"), install=True)
         self.broker.start()
         self.addCleanup(restore)
@@ -2727,19 +2740,111 @@ class BrokerTests(TestCase):
         self.addCleanup(django_cache.clear)
         self.addCleanup(popups_mod.stop)
 
-    def test_protect_sites_from_hub_settings(self):
+    def test_nvrs_migrate_from_numbered_settings(self):
         from . import config
         self.broker.settings.update({
-            ("cameras", "protect_host_2"): "10.0.0.2", ("cameras", "protect_api_key_2"): "k",
-            ("cameras", "protect_name_2"): "Shop", ("cameras", "protect_username_2"): "viewer",
-            ("cameras", "protect_password_2"): "pw",
+            ("cameras", "protect_host_2"): "10.0.0.2", ("cameras", "protect_name_2"): "Shop",
+            ("cameras", "protect_username_2"): "viewer",
+            ("cameras", "protect_host_3"): "10.0.0.3",  # no key: listed, but not a site
         })
-        with patch.dict("os.environ", {}) as env:
-            for k in [k for k in env if "PROTECT_" in k]:
-                del env[k]
+        self.broker.secrets.update({("cameras", "protect_api_key_2"): "k",
+                                    ("cameras", "protect_password_2"): "pw"})
+        config.forget_sites()
+        self.addCleanup(config.forget_sites)
+        with patch.object(config, "protect_sites", _real_protect_sites):
             self.assertEqual(config.protect_sites(), [
-                {"host": "10.0.0.2", "api_key": "k", "name": "Shop", "username": "viewer", "password": "pw"}])
-        self.assertIn({"app": "cameras", "key": "protect_host_1"}, self.broker.ops("settings.get"))
+                {"id": "2", "host": "10.0.0.2", "api_key": "k", "name": "Shop",
+                 "username": "viewer", "password": "pw"}])
+            self.assertEqual([n["id"] for n in self.broker.state[("cameras", "nvrs")]], ["2", "3"])
+            # Cached: no more secret reads within the minute.
+            reads = len(self.broker.ops("secrets.get"))
+            config.protect_sites()
+            self.assertEqual(len(self.broker.ops("secrets.get")), reads)
+
+    def _nvr_admin(self):
+        from . import config
+        config.forget_sites()
+        self.addCleanup(config.forget_sites)
+        for p in (patch.object(config, "protect_sites", _real_protect_sites),
+                  patch("cameras.views.is_admin", return_value=True),
+                  patch("cameras.events.restart")):
+            p.start()
+            self.addCleanup(p.stop)
+        self.broker.state[("cameras", "nvrs")] = []
+
+    def _post(self, what, body):
+        return self.client.post(f"/cameras/settings/nvrs/{what}/", json.dumps(body),
+                                content_type="application/json")
+
+    def test_nvr_pages_admin_only(self):
+        self.assertEqual(self.client.get("/cameras/settings/nvrs/").status_code, 404)
+        for what in ("save", "remove", "test"):
+            self.assertEqual(self._post(what, {}).status_code, 404)
+
+    def test_nvr_add_edit_remove(self):
+        self._nvr_admin()
+        resp = self._post("save", {"name": "Home", "host": "https://10.0.0.1/protect", "api_key": "k1"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["nvrs"], [{"id": "1", "name": "Home", "host": "10.0.0.1", "username": "",
+                                                "has_api_key": True, "has_password": False}])
+        self.assertEqual(self.broker.secrets[("cameras", "protect_api_key_1")], "k1")
+
+        # A blank key keeps the saved one; an account needs a password.
+        resp = self._post("save", {"id": "1", "name": "Home", "host": "10.0.0.1", "username": "view"})
+        self.assertEqual((resp.status_code, resp.json()["field"]), (400, "password"))
+        resp = self._post("save", {"id": "1", "name": "House", "host": "10.0.0.1",
+                                   "username": "view", "password": "pw"})
+        self.assertEqual(resp.json()["nvrs"][0]["has_password"], True)
+        self.assertEqual(self.broker.secrets[("cameras", "protect_api_key_1")], "k1")
+        self.assertEqual(self.broker.secrets[("cameras", "protect_password_1")], "pw")
+        # Dropping the account forgets its password.
+        self._post("save", {"id": "1", "name": "House", "host": "10.0.0.1"})
+        self.assertNotIn(("cameras", "protect_password_1"), self.broker.secrets)
+
+        page = self.client.get("/cameras/settings/nvrs/")
+        self.assertContains(page, "House")
+        self.assertNotContains(page, "k1")
+
+        resp = self._post("remove", {"id": "1"})
+        self.assertEqual(resp.json()["nvrs"], [])
+        self.assertNotIn(("cameras", "protect_api_key_1"), self.broker.secrets)
+        self.assertEqual(self._post("remove", {"id": "1"}).status_code, 404)
+
+    def test_nvr_save_rejects(self):
+        self._nvr_admin()
+        self._post("save", {"name": "Home", "host": "10.0.0.1", "api_key": "k"})
+        for body, field in (
+            ({"host": "10.0.0.2", "api_key": "k"}, "name"),
+            ({"name": "Shop", "host": "not a host!", "api_key": "k"}, "host"),
+            ({"name": "Shop", "host": "10.0.0.2"}, "api_key"),
+            ({"name": "Shop", "host": "10.0.0.1", "api_key": "k"}, "host"),
+            ({"name": "home", "host": "10.0.0.2", "api_key": "k"}, "name"),
+        ):
+            resp = self._post("save", body)
+            self.assertEqual((resp.status_code, resp.json().get("field")), (400, field), body)
+        self.assertEqual(self._post("save", {"id": "9", "name": "X", "host": "10.0.0.9"}).status_code, 404)
+
+    def test_nvr_test(self):
+        self._nvr_admin()
+        self._post("save", {"name": "Home", "host": "10.0.0.1", "api_key": "saved"})
+
+        def answer(status, data):
+            resp = MagicMock(status_code=status, ok=status < 400)
+            resp.json.return_value = data
+            return resp
+
+        with patch("cameras.protect_api._request", return_value=answer(200, [{}, {}])) as req:
+            self.assertEqual(self._post("test", {"id": "1", "host": "10.0.0.1"}).json(),
+                             {"ok": True, "cameras": 2})
+            self.assertEqual(req.call_args.kwargs["headers"], {"X-API-KEY": "saved"})
+        with patch("cameras.protect_api._request", return_value=answer(401, {})):
+            self.assertEqual(self._post("test", {"host": "10.0.0.1", "api_key": "bad"}).json()["field"], "api_key")
+        with patch("cameras.protect_api._request", return_value=answer(200, {"not": "cameras"})):
+            self.assertFalse(self._post("test", {"host": "10.0.0.1", "api_key": "k"}).json()["ok"])
+        with patch("cameras.protect_api._request", return_value=answer(200, [])), \
+                patch("cameras.views._test_login", return_value=False):
+            body = self._post("test", {"host": "10.0.0.1", "api_key": "k", "username": "u", "password": "p"}).json()
+            self.assertEqual((body["ok"], body["field"]), (False, "password"))
 
     def test_go2rtc_companion_wins(self):
         from . import config

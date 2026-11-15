@@ -1,5 +1,7 @@
 """Camera app settings: the go2rtc server and the UniFi Protect sites."""
 import os
+import threading
+import time
 
 from bdh_sdk.settings import app_setting, as_bool
 
@@ -16,29 +18,103 @@ def go2rtc_url():
         "cameras", "go2rtc_url", "http://localhost:1984", legacy=("GO2RTC_URL",))
 
 
-def protect_sites():
-    """UniFi Protect sites as dicts with host, api_key, name, username and password.
+NVRS_KEY = "nvrs"
+SITES_TTL = 60
 
-    Sites are the numbered app settings ``protect_{host,api_key,name}_<n>``
-    (saved on the hub, or env ``BDH_CAMERAS_PROTECT_{HOST,API_KEY,NAME}_<n>``),
-    n = 1..9; a site needs
-    both a host and an API key. ``protect_{username,password}_<n>`` are an
-    optional local Protect account (view only) for events and recordings.
+_sites_cache = None  # (monotonic expiry, sites)
+_sites_lock = threading.Lock()
+
+
+def api_key_secret(nvr_id):
+    return f"protect_api_key_{nvr_id}"
+
+
+def password_secret(nvr_id):
+    return f"protect_password_{nvr_id}"
+
+
+def _migrate_numbered():
+    """The NVRs from the old numbered settings ``protect_{host,name,username}_<n>``.
+
+    Their ids are the old numbers, so the secrets ``protect_api_key_<n>`` and
+    ``protect_password_<n>`` (already in the hub's vault) keep working.
     """
-    sites = []
+    out = []
     for i in range(1, MAX_PROTECT_SITES + 1):
         host = app_setting("cameras", f"protect_host_{i}", "")
-        api_key = app_setting("cameras", f"protect_api_key_{i}", "")
-        name = app_setting("cameras", f"protect_name_{i}", f"Site {i}")
-        if host and api_key:
-            sites.append({
+        if host:
+            out.append({
+                "id": str(i),
                 "host": host,
-                "api_key": api_key,
-                "name": name,
+                "name": app_setting("cameras", f"protect_name_{i}", "") or f"Site {i}",
                 "username": app_setting("cameras", f"protect_username_{i}", ""),
-                "password": app_setting("cameras", f"protect_password_{i}", ""),
             })
-    return sites
+    return out
+
+
+def nvrs():
+    """The UniFi Protect consoles (NVRs) set up on the NVRs settings page.
+
+    A list of ``{id, name, host, username}``; the API key and password are
+    secrets. The first read moves the old numbered settings over.
+    """
+    from bdh_sdk.storage import app_state
+
+    state = app_state("cameras")
+    raw = state.get(NVRS_KEY)
+    if raw is None:
+        raw = _migrate_numbered()
+        state.set(NVRS_KEY, raw)
+    return [n for n in raw if isinstance(n, dict) and n.get("id") and n.get("host")]
+
+
+def save_nvrs(items):
+    """Store the NVR list (secrets are set separately) and drop the cached sites."""
+    from bdh_sdk.storage import app_state
+
+    app_state("cameras").set(NVRS_KEY, [
+        {"id": n["id"], "name": n["name"], "host": n["host"], "username": n.get("username", "")}
+        for n in items
+    ])
+    forget_sites()
+
+
+def forget_sites():
+    global _sites_cache
+    with _sites_lock:
+        _sites_cache = None
+
+
+def protect_sites():
+    """UniFi Protect sites as dicts with id, host, api_key, name, username and password.
+
+    From the NVRs settings page, the only source. A site needs both a host and
+    an API key; the username and password are an optional local Protect
+    account (view only) for events and recordings. Cached for a minute, since
+    secret reads are rate limited.
+    """
+    global _sites_cache
+    with _sites_lock:
+        if _sites_cache and _sites_cache[0] > time.monotonic():
+            return [dict(s) for s in _sites_cache[1]]
+    from bdh_sdk import secrets
+
+    sites = []
+    for n in nvrs():
+        api_key = secrets.get(api_key_secret(n["id"]), "", app="cameras")
+        if not api_key:
+            continue
+        sites.append({
+            "id": n["id"],
+            "host": n["host"],
+            "api_key": api_key,
+            "name": n.get("name") or n["host"],
+            "username": n.get("username", ""),
+            "password": secrets.get(password_secret(n["id"]), "", app="cameras") if n.get("username") else "",
+        })
+    with _sites_lock:
+        _sites_cache = (time.monotonic() + SITES_TTL, sites)
+    return [dict(s) for s in sites]
 
 
 # Event kinds in display order. ``motion`` is plain motion with no smart detection.
