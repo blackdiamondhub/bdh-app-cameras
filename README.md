@@ -141,12 +141,12 @@ CI (`.github/workflows/ci.yml`) uses the reusable `app-ci.yml` from
 bdh-sdk. It builds the wheel, installs it next to the hub, then runs
 `hub_smoke`, the app tests and the selenium tests.
 
-The `container-smoke` job runs `scripts/container_smoke.sh`: it starts the wheel in the
-published runtime image (`bdh-app-runtime:hub-api-2`) with a 96 MB limit and a Protect
-account, waits for `/_bdh/health`, checks the logs for import or database errors, and prints
-the container's memory use. Run it locally with `sh scripts/container_smoke.sh dist/*.whl`
-(set `RUNTIME_IMAGE` to test another image).
+Its `image` job locks the dependencies, builds the app's container image the way the platform
+does (bdh-sdk `builder/`, FROM `bdh-app-runtime:hub-api-2`, without PyAV via `[tool.bdh]
+pip_exclude`), starts it hardened like the supervisor with a 96 MB limit and an unreachable
+Protect account, waits for `/_bdh/health` and reports RSS/PSS in the job summary.
 
-To release, bump `version` in `pyproject.toml`. When that lands on
-`main`, `release.yml` tags it and publishes the wheel, and the release
-notes include the hashed line for the hub's `sites/<site>/apps.txt`.
+To release, bump `version` in `pyproject.toml`. When that lands on `main`, `release.yml` tags it
+and publishes the wheel, `bdh-lock.txt` and `bdh-app.json`. The catalog's builder
+(`blackdiamondlodge/bdh-app-catalog`, `build.yml`) then builds, attests and pushes
+`ghcr.io/blackdiamondlodge/bdh-app-cameras` and adds the version to the catalog.

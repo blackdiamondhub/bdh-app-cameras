@@ -202,7 +202,8 @@ def _without_av():
     """Let uiprotect import without PyAV (~130 MB on disk, ~16 MB RSS).
 
     uiprotect imports ``av`` at module level for talkback/streaming, which
-    this app never uses, so the app runtime image leaves PyAV out.
+    this app never uses, so its image leaves PyAV out (``[tool.bdh]
+    pip_exclude`` in pyproject.toml).
     """
     try:
         import av  # noqa: F401
