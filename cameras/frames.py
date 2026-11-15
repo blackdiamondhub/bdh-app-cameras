@@ -7,6 +7,7 @@ small JPEGs in a byte-capped in-process LRU.
 import io
 import logging
 import threading
+import time
 from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,8 @@ def clear():
     with _lock:
         _cache.clear()
         _size = 0
+    with _live_lock:
+        _live.clear()
 
 
 def warm(camera_id, ts, data, width):
@@ -71,6 +74,84 @@ def warm(camera_id, ts, data, width):
 
 def warm_async(camera_id, ts, data, width):
     threading.Thread(target=warm, args=(camera_id, ts, data, width), daemon=True).start()
+
+
+# Live stills are only card posters (shown until the stream's first frame). A
+# Protect fetch takes ~0.5-1 s, which left cards black on first paint, so serve
+# the last still at once and refresh it in the background. Posters requested
+# recently are kept warm so the next page load is instant too.
+LIVE_FRESH = 30          # seconds before a cached still is refreshed
+LIVE_MAX_AGE = 15 * 60   # older stills are fetched synchronously (day/night may have changed)
+LIVE_WARM_FOR = 2 * 3600  # keep refreshing posters requested within this window
+LIVE_WARM_EVERY = 60
+
+_live = {}  # (camera_id, width) -> [fetched_at, data, last_requested]
+_live_busy = set()
+_live_lock = threading.Lock()
+_warmer = None
+
+
+def live_get(key, fetch, now=None):
+    """Return a live still for ``key``; ``fetch()`` gets a new one (may raise)."""
+    now = time.monotonic() if now is None else now
+    with _live_lock:
+        entry = _live.get(key)
+        if entry is not None:
+            entry[2] = now
+            age = now - entry[0]
+            if age <= LIVE_MAX_AGE:
+                if age > LIVE_FRESH:
+                    _refresh_async(key, fetch)
+                _ensure_warmer(fetch)
+                return entry[1]
+    data = fetch(key)
+    if data:
+        with _live_lock:
+            _live[key] = [time.monotonic(), data, now]
+            _ensure_warmer(fetch)
+    return data
+
+
+def _refresh(key, fetch):
+    try:
+        data = fetch(key)
+        if data:
+            with _live_lock:
+                last = _live.get(key, [0, b'', time.monotonic()])[2]
+                _live[key] = [time.monotonic(), data, last]
+    except Exception as err:
+        logger.debug("Live still refresh failed for %s: %s", key, err)
+    finally:
+        with _live_lock:
+            _live_busy.discard(key)
+
+
+def _refresh_async(key, fetch):
+    # Caller holds _live_lock.
+    if key in _live_busy:
+        return
+    _live_busy.add(key)
+    threading.Thread(target=_refresh, args=(key, fetch), daemon=True).start()
+
+
+def _ensure_warmer(fetch):
+    # Caller holds _live_lock.
+    global _warmer
+    if _warmer is None or not _warmer.is_alive():
+        _warmer = threading.Thread(target=_warm_loop, args=(fetch,), daemon=True, name='poster-warmer')
+        _warmer.start()
+
+
+def _warm_loop(fetch):
+    while True:
+        time.sleep(LIVE_WARM_EVERY)
+        now = time.monotonic()
+        with _live_lock:
+            for key, (fetched, _data, last) in list(_live.items()):
+                if now - last > LIVE_WARM_FOR:
+                    del _live[key]
+                elif now - fetched > LIVE_FRESH:
+                    _refresh_async(key, fetch)
 
 
 def resize(data, width):

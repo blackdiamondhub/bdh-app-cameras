@@ -2282,16 +2282,37 @@ class EventViewTests(TestCase):
         self.assertEqual(client.get_camera_snapshot.call_args_list[0].kwargs["width"], 1280)
         self.assertIsNone(frames_mod.get(("cam1", 1_700_000_100, 320)))
 
-    def test_live_snapshot_is_not_cached(self):
+    def test_live_snapshot_is_cached_and_refreshed_in_background(self):
         client = MagicMock()
-        client.get_camera_snapshot.return_value = b"live"
-        with patch("cameras.views.events.run", side_effect=lambda cam, fn, **kw: fn(client)):
+        client.get_camera_snapshot.side_effect = [b"one", b"two", b"three"]
+        refreshed = []
+        with patch("cameras.views.events.run", side_effect=lambda cam, fn, **kw: fn(client)), \
+                patch("cameras.frames._ensure_warmer"), \
+                patch("cameras.frames._refresh_async",
+                      side_effect=lambda key, fetch: (refreshed.append(key), frames_mod._refresh(key, fetch))):
             c = self._admin()
-            c.get("/cameras/snapshot/cam1/?w=160")
-            resp = c.get("/cameras/snapshot/cam1/?w=160")
-        self.assertEqual(resp.content, b"live")
-        self.assertEqual(resp["Cache-Control"], "no-store")
-        self.assertEqual(client.get_camera_snapshot.call_count, 2)
+            first = c.get("/cameras/snapshot/cam1/?w=160")
+            cached = c.get("/cameras/snapshot/cam1/?w=160")
+            self.assertEqual(refreshed, [])
+            frames_mod._live[("cam1", 160)][0] -= frames_mod.LIVE_FRESH + 1
+            stale = c.get("/cameras/snapshot/cam1/?w=160")  # served at once, refreshed behind
+            fresh = c.get("/cameras/snapshot/cam1/?w=160")
+            frames_mod._live[("cam1", 160)][0] -= frames_mod.LIVE_MAX_AGE + 1
+            too_old = c.get("/cameras/snapshot/cam1/?w=160")
+        self.assertEqual([r.content for r in (first, cached, stale, fresh, too_old)],
+                         [b"one", b"one", b"one", b"two", b"three"])
+        self.assertEqual(refreshed, [("cam1", 160)])
+        self.assertEqual(first["Cache-Control"], "no-store")
+        client.get_camera_snapshot.assert_called_with("cam1", width=160, dt=None)
+
+    def test_live_snapshot_failure_is_not_cached(self):
+        client = MagicMock()
+        client.get_camera_snapshot.side_effect = [b"", b"img"]
+        with patch("cameras.views.events.run", side_effect=lambda cam, fn, **kw: fn(client)), \
+                patch("cameras.frames._ensure_warmer"):
+            c = self._admin()
+            self.assertEqual(c.get("/cameras/snapshot/cam1/?w=160").status_code, 404)
+            self.assertEqual(c.get("/cameras/snapshot/cam1/?w=160").content, b"img")
 
     def test_clip_window_is_capped(self):
         client = MagicMock()

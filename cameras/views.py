@@ -285,6 +285,11 @@ def event_thumb(request, event_id):
     return resp
 
 
+def _fetch_live(key):
+    camera_id, width = key
+    return events.run(camera_id, lambda client: client.get_camera_snapshot(camera_id, width=width, dt=None))
+
+
 @admin_only
 @require_GET
 def snapshot(request, camera_id):
@@ -304,12 +309,15 @@ def snapshot(request, camera_id):
             resp['Cache-Control'] = 'private, max-age=3600'
             return resp
     try:
-        # Warm widths share one full-size fetch (Protect's cost is ~the same at any width).
-        fetch_w = max(frames.WARM_WIDTHS) if dt is not None and width in frames.WARM_WIDTHS else width
-        data = events.run(
-            camera_id,
-            lambda client: client.get_camera_snapshot(camera_id, width=fetch_w, dt=dt),
-        )
+        if dt is None:
+            data = frames.live_get((camera_id, width), _fetch_live)
+        else:
+            # Warm widths share one full-size fetch (Protect's cost is ~the same at any width).
+            fetch_w = max(frames.WARM_WIDTHS) if width in frames.WARM_WIDTHS else width
+            data = events.run(
+                camera_id,
+                lambda client: client.get_camera_snapshot(camera_id, width=fetch_w, dt=dt),
+            )
     except events.WorkerUnavailable:
         return _unavailable()
     except Exception as err:
