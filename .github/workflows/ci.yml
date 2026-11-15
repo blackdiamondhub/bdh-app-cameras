@@ -11,13 +11,14 @@ jobs:
     with:
       app_id: cameras
       go2rtc: true
-
-  container-smoke:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - run: pip install build && python -m build --wheel
-      - run: sh scripts/container_smoke.sh dist/*.whl
+      # The image job builds the real app image (bdh-sdk builder/) and runs
+      # it hardened like the supervisor. The Protect host is unreachable on
+      # purpose: the events worker still imports uiprotect and keeps
+      # retrying, which is most of what it costs at rest.
+      smoke_env: |
+        BDH_CAMERAS_PROTECT_HOST_1=192.0.2.1
+        BDH_CAMERAS_PROTECT_API_KEY_1=x
+        BDH_CAMERAS_PROTECT_USERNAME_1=smoke
+        BDH_CAMERAS_PROTECT_PASSWORD_1=smoke
+        BDH_GO2RTC_URL=http://127.0.0.1:1984
+      smoke_settle: 20
