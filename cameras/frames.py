@@ -11,7 +11,7 @@ from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
 
-CACHE_BYTES = 50 * 1024 * 1024
+CACHE_BYTES = 12 * 1024 * 1024
 TS_STEP = 5  # seconds; scrub positions within this window share a frame
 # The scrubber's frame card asks for 320 px while dragging and the full view
 # for 1280 px on release; a cold fetch at one fills the cache for the other.

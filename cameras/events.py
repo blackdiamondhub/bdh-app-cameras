@@ -27,6 +27,7 @@ POPPED_MAX = 200
 PRUNE_EVERY = 3600
 THUMB_SIZE = 360
 TIMEOUT = 30
+TABLE_WAIT = 60
 
 _SMART_KIND = {
     "person": "person", "face": "person",
@@ -144,6 +145,18 @@ def _save_thumb(event_id, data):
 
 
 @_db
+def tables_ready():
+    from django.db import connection
+
+    from .models import ProtectEvent
+
+    try:
+        return ProtectEvent._meta.db_table in connection.introspection.table_names()
+    except Exception:
+        return False
+
+
+@_db
 def prune():
     from django.utils import timezone as djtz
 
@@ -185,6 +198,20 @@ async def _push_popup(camera_id, camera_name, ttl, kind="doorbell", sound=None):
         logger.exception("Camera pop-up failed")
 
 
+def _without_av():
+    """Let uiprotect import without PyAV (~130 MB on disk, ~16 MB RSS).
+
+    uiprotect imports ``av`` at module level for talkback/streaming, which
+    this app never uses, so the app runtime image leaves PyAV out.
+    """
+    try:
+        import av  # noqa: F401
+    except ImportError:
+        import sys
+        import types
+        sys.modules.setdefault("av", types.ModuleType("av"))
+
+
 class SiteWorker:
     def __init__(self, site):
         self.site = site["name"]
@@ -218,6 +245,11 @@ class SiteWorker:
         return await asyncio.get_running_loop().run_in_executor(self._db_pool, fn, *args)
 
     async def _main(self):
+        # The container starts workers before it migrates; wait for our table.
+        for _ in range(TABLE_WAIT):
+            if await self._in_db(tables_ready):
+                break
+            await asyncio.sleep(1)
         backoff = 10
         while True:
             client = None
@@ -246,6 +278,7 @@ class SiteWorker:
             backoff = min(backoff * 2, 600)
 
     async def _connect(self):
+        _without_av()
         from uiprotect import ProtectApiClient
         from uiprotect.data import ModelType
 
@@ -385,11 +418,19 @@ _SKIP_COMMANDS = {
 }
 
 
+def _is_runtime(path):
+    """``python -m bdh_sdk.runtime`` (the app's container) runs ``bdh_sdk/runtime/__main__.py``."""
+    parts = path.replace("\\", "/").split("/")
+    return parts[-3:] == ["bdh_sdk", "runtime", "__main__.py"]
+
+
 def should_start(argv=None):
-    """Start only in the server process (Daphne, or runserver's reloaded child)."""
+    """Start only in the server process (the app container, Daphne, or runserver's child)."""
     if os.environ.get("BDH_CAMERAS_EVENTS", "").lower() in ("0", "false", "off", "no"):
         return False
     argv = sys.argv if argv is None else argv
+    if argv and _is_runtime(argv[0]):
+        return True
     prog = os.path.basename(argv[0]) if argv else ""
     if "daphne" in prog:
         return True

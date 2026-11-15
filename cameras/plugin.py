@@ -1,5 +1,5 @@
 from bdh_sdk import PluginSpec, Setting, SettingsPage, Tile
-from bdh_sdk.plugins import BOOL, CHOICE, INT
+from bdh_sdk.plugins import BOOL, CHOICE, INT, LIFECYCLE_ALWAYS, NETWORK_LAN
 
 _KIND_HELP = "Show these in the Last 24 hours panel and on the timeline (signed-in admins only)."
 
@@ -40,4 +40,14 @@ spec = PluginSpec(
                      subtitle="Which detections and Home Assistant events pop up each camera",
                      icon="fas fa-bell"),
     ),
+    api_version=2,
+    # Pop-ups: the trigger picker lists HA entities, any of them can trigger
+    # a camera, and a detection or trigger pushes a hub alert.
+    permissions=("alerts", "ha.read:*", "events.subscribe:ha/state/#"),
+    # The UniFi Protect consoles and the go2rtc companion are on the LAN.
+    network=NETWORK_LAN,
+    # The Protect event workers keep a websocket per site open.
+    lifecycle=LIFECYCLE_ALWAYS,
+    memory_mb=96,
+    companions=("go2rtc",),
 )

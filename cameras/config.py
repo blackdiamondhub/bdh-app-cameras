@@ -1,5 +1,5 @@
 """Camera app settings: the go2rtc server and the UniFi Protect sites."""
-from django.conf import settings
+import os
 
 from bdh_sdk.settings import app_setting, as_bool
 
@@ -7,22 +7,24 @@ MAX_PROTECT_SITES = 9
 
 
 def go2rtc_url():
-    """go2rtc API URL (BDH_CAMERAS_GO2RTC_URL, legacy GO2RTC_URL)."""
-    return app_setting("cameras", "go2rtc_url", "http://localhost:1984", legacy=("GO2RTC_URL",))
+    """go2rtc API URL.
+
+    In a container the supervisor's go2rtc companion (``BDH_GO2RTC_URL``) wins;
+    otherwise BDH_CAMERAS_GO2RTC_URL, legacy GO2RTC_URL.
+    """
+    return os.environ.get("BDH_GO2RTC_URL") or app_setting(
+        "cameras", "go2rtc_url", "http://localhost:1984", legacy=("GO2RTC_URL",))
 
 
 def protect_sites():
     """UniFi Protect sites as dicts with host, api_key, name, username and password.
 
-    ``settings.UNIFI_PROTECT_SITES`` wins when defined. Otherwise sites come
-    from numbered env vars ``BDH_CAMERAS_PROTECT_{HOST,API_KEY,NAME}_<n>``
-    (legacy ``UNIFI_PROTECT_{HOST,API_KEY,NAME}_<n>``), n = 1..9; a site
-    needs both a host and an API key. ``BDH_CAMERAS_PROTECT_{USERNAME,PASSWORD}_<n>``
-    are an optional local Protect account (view only) for events and recordings.
+    Sites are the numbered app settings ``protect_{host,api_key,name}_<n>``
+    (saved on the hub, or env ``BDH_CAMERAS_PROTECT_{HOST,API_KEY,NAME}_<n>``,
+    legacy ``UNIFI_PROTECT_{HOST,API_KEY,NAME}_<n>``), n = 1..9; a site needs
+    both a host and an API key. ``protect_{username,password}_<n>`` are an
+    optional local Protect account (view only) for events and recordings.
     """
-    configured = getattr(settings, "UNIFI_PROTECT_SITES", None)
-    if configured is not None:
-        return configured
     sites = []
     for i in range(1, MAX_PROTECT_SITES + 1):
         host = app_setting("cameras", f"protect_host_{i}", "", legacy=(f"UNIFI_PROTECT_HOST_{i}",))

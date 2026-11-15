@@ -1844,4 +1844,15 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     }
 </script>
 {% endif %}
+{% if keep_open %}
+<script>
+    // In the hub's iframe the hub can't see the bdh-screensaver meta, so keep it awake
+    // with activity messages while this page is open (see bdh_sdk embed.js).
+    window.addEventListener('DOMContentLoaded', () => {
+        if (!window.bdh) return;
+        window.bdh.send('activity');
+        setInterval(() => window.bdh.send('activity'), 30000);
+    });
+</script>
+{% endif %}
 {% endblock %}
