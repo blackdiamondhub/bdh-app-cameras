@@ -1452,6 +1452,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     class Scrubber {
         constructor(card) {
             this.card = card;
+            this.trail = [];
             this.cam = card.dataset.cameraId;
             this.bar = card.querySelector('.cam-scrub');
             this.track = this.bar.querySelector('.scrub-track');
@@ -1531,6 +1532,10 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
             this.track.addEventListener('pointercancel', end);
 
             for (const v of [this.video, this.spare]) {
+                for (const type of ['loadstart', 'loadeddata', 'canplay', 'playing', 'waiting', 'stalled',
+                    'pause', 'ended', 'error', 'abort', 'emptied']) {
+                    v.addEventListener(type, () => this.note(type, v));
+                }
                 const active = () => v === this.video && this.mode === 'replay';
                 v.addEventListener('timeupdate', () => {
                     if (!active() || this.dragging) return;
@@ -1559,6 +1564,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
                     if (this.clipTries < CLIP_RETRIES) {
                         const src = v.getAttribute('src');
                         const delay = 1500 * 2 ** this.clipTries++;
+                        this.note('retry' + this.clipTries, v);
                         clearTimeout(this.retryTID);
                         this.retryTID = setTimeout(() => {
                             if (this.mode !== 'replay' || v !== this.video || v.getAttribute('src') !== src) return;
@@ -1568,12 +1574,33 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
                         return;
                     }
                     this.clipFailed = true;
+                    this.note('failed', v);
                     this.card.classList.remove('loading');
                     this.setPlayIcon(false);
                     this.timeEl.textContent = 'Clip unavailable \u2013 tap \u25B6 to retry';
                     showChrome();
                 });
             }
+        }
+
+        // Short trail of media events and player decisions for the soak's
+        // stats probe, to explain a replay that ends up stuck.
+        note(what, v) {
+            const which = !v ? '' : v === this.video ? 'main' : 'spare';
+            this.trail.push({ at: Date.now(), what, which, rs: v ? v.readyState : null, paused: v ? v.paused : null });
+            if (this.trail.length > 30) this.trail.shift();
+        }
+        diag() {
+            const vs = v => ({
+                rs: v.readyState, ns: v.networkState, paused: v.paused, ended: v.ended,
+                err: v.error ? v.error.code : null, t: Math.round(v.currentTime * 10) / 10,
+                src: (v.getAttribute('src') || '').split('?')[1] || null,
+            });
+            return {
+                cam: this.cam, mode: this.mode, tries: this.clipTries, failed: !!this.clipFailed,
+                dragging: !!this.dragging, cls: this.card.className, video: vs(this.video), spare: vs(this.spare),
+                trail: this.trail.slice(-20),
+            };
         }
 
         // Fetch the following chunk into the hidden player while this one plays.
@@ -1591,6 +1618,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
             this.clipStart = this.spareStart;
             this.spareStart = null;
             this.clipTries = 0;
+            this.note('swap', this.video);
             this.video.classList.remove('standby');
             old.classList.add('standby');
             old.pause();
@@ -1878,12 +1906,14 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
             this.timeEl.textContent = fmtFull(t);
             this.clearSpare();
             this.video.src = CLIP_URL(this.cam, s, e);
-            this.video.play().catch(() => {});
+            this.note('replay', this.video);
+            this.video.play().catch(err => this.note('play-reject:' + err.name, this.video));
             this.render();
             if (document.fullscreenElement === this.card) showChrome();
         }
 
         goLive() {
+            this.note('live', null);
             this.mode = 'live';
             this.clipFailed = false;
             clearTimeout(this.retryTID);
@@ -1933,6 +1963,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     document.querySelectorAll('.cam-card').forEach(card => {
         if (card.querySelector('.cam-scrub')) scrubbers.set(card, new Scrubber(card));
     });
+    window.__camScrubDiag = () => scrubbers.get(document.fullscreenElement)?.diag() || null;
 
     document.addEventListener('fullscreenchange', () => {
         scrubbers.forEach((s, card) => {
@@ -1965,6 +1996,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         const paused = s.mode === 'replay' && s.video.paused && !s.video.ended;
         if (s.dragging || paused || s.clipFailed) { chromeTID = setTimeout(hideChrome, CHROME_IDLE_MS); return; }
         s.hideCard();
+        s.note('hide-chrome', s.video);
         card.classList.add('chrome-hidden');
     }
     document.addEventListener('pointerdown', e => {
@@ -2092,6 +2124,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
                     live: streams.filter(s => s.active && s.state === 'live').length,
                     active: streams.filter(s => s.active).length,
                     fullscreen: document.fullscreenElement ? (document.fullscreenElement.id || document.fullscreenElement.className || true) : null,
+                    scrub: window.__camScrubDiag ? window.__camScrubDiag() : null,
                     black: {
                         total: blackTotal, spans: blackSpans.slice(-20),
                         open: [...blackOpen.values()].map(s => ({ ...s, ms: Date.now() - s.start })),
