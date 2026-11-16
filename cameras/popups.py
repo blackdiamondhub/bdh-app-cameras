@@ -10,11 +10,13 @@ Admins choose these on the Pop-ups settings page, which saves app state
          "kinds": ["doorbell", "person"],
          "sounds": {"person": "none"},
          "triggers": [{"entity_id": "binary_sensor.front_door"},
-                      {"entity_id": "lock.front_door", "to": "unlocked", "sound": "westminster"}]}}}
+                      {"entity_id": "lock.front_door", "to": "unlocked", "sound": "westminster"},
+                      {"entity_id": "lock.gate", "instance": "cabin"}]}}}
 
 A trigger without ``to`` fires on its domain's usual "something happened":
 a binary sensor turning on, a lock unlocking, a new ``event.*`` event, or any
-other state change.
+other state change. ``instance`` is the Home Assistant instance the entity
+belongs to; it's left out for the default instance (``"ha"``).
 
 Each pop-up plays a hub chime (``bdh_sdk.alerts.CHIMES``, or ``"none"``).
 Only choices that differ from the defaults are stored: ``sounds`` per
@@ -54,6 +56,8 @@ TRIGGER_SOUND = "knock-knock"
 _OPENINGS = {"door", "garage_door", "opening", "window"}
 _NO_STATE = {None, "", "unavailable", "unknown"}
 _ENTITY_ID = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
+_INSTANCE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+DEFAULT_INSTANCE = "ha"
 _subscriptions = []
 _started = False
 
@@ -86,10 +90,17 @@ def clean(raw):
                 continue
             to = trig.get("to")
             to = to.strip()[:64] if isinstance(to, str) else ""
-            if (entity_id, to) in seen:
+            instance = trig.get("instance")
+            if instance in (None, "", DEFAULT_INSTANCE):
+                instance = None
+            elif not isinstance(instance, str) or not _INSTANCE.match(instance):
                 continue
-            seen.add((entity_id, to))
+            if (instance, entity_id, to) in seen:
+                continue
+            seen.add((instance, entity_id, to))
             out = {"entity_id": entity_id, "to": to} if to else {"entity_id": entity_id}
+            if instance:
+                out["instance"] = instance
             sound = _sound(trig.get("sound"), TRIGGER_SOUND)
             if sound:
                 out["sound"] = sound
@@ -228,7 +239,8 @@ def _targets():
     if cfg is None or not cfg["enabled"]:
         return []
     return [
-        (f"ha/state/{trig['entity_id']}", {"trigger": trig, "camera_id": camera_id})
+        (f"{trig.get('instance') or DEFAULT_INSTANCE}/state/{trig['entity_id']}",
+         {"trigger": trig, "camera_id": camera_id})
         for camera_id, cam in cfg["cameras"].items()
         for trig in cam["triggers"]
     ]
