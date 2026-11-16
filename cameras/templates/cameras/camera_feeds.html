@@ -2009,6 +2009,56 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
 </script>
 {% endif %}
 <script>
+    // Records spans where an on-screen live tile shows neither a presented
+    // video frame nor a loaded still (i.e. the user sees black), with why.
+    const blackSpans = [];
+    const blackOpen = new Map();
+    let blackTotal = 0;
+    (function () {
+        const open = blackOpen;
+        const close = (name, now) => {
+            const s = open.get(name);
+            open.delete(name);
+            const ms = now - s.start;
+            if (ms < 150) return;
+            blackTotal++;
+            blackSpans.push({ ...s, ms });
+            if (blackSpans.length > 50) blackSpans.shift();
+        };
+        setInterval(() => {
+            const now = Date.now();
+            const fsEl = document.fullscreenElement;
+            const cards = document.hidden ? []
+                : fsEl ? (fsEl.classList.contains('cam-card') ? [fsEl] : [])
+                : [...document.querySelectorAll('.site-panel.active .cam-card')];
+            const seen = new Set();
+            for (const card of cards) {
+                if (card.classList.contains('replaying') || card.classList.contains('scrubbing')) continue;
+                const els = [...card.querySelectorAll('video-stream')];
+                const name = els[0]?.dataset.streamName || card.id || '?';
+                const ended = el => {
+                    const so = el.video && el.video.srcObject;
+                    const t = so && so.getVideoTracks ? so.getVideoTracks() : [];
+                    return t.length > 0 && t.every(x => x.readyState === 'ended');
+                };
+                const framed = els.filter(el => el.classList.contains('has-frame') && el.video && el.video.videoWidth);
+                const img = card.querySelector('.cam-poster');
+                let why = null;
+                if (framed.length && framed.some(el => !ended(el))) why = null;
+                else if (img && img.complete && img.naturalWidth > 0) why = null;
+                else if (framed.length) why = 'track-ended';
+                else why = !img ? 'no-poster' : img.complete ? 'poster-failed' : 'poster-loading';
+                if (!why) continue;
+                seen.add(name);
+                if (!open.has(name)) open.set(name, {
+                    name, why, at: now, start: now, fs: !!fsEl,
+                    sincePage: Math.round(performance.now()),
+                });
+            }
+            for (const name of [...open.keys()]) if (!seen.has(name)) close(name, now);
+        }, 100);
+    })();
+
     // Per-stream state for the hub's remote `frame state` command (bdh-sdk 0.33+),
     // so a soak can check that tiles are live and decoding.
     window.addEventListener('DOMContentLoaded', () => {
@@ -2042,6 +2092,10 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
                     live: streams.filter(s => s.active && s.state === 'live').length,
                     active: streams.filter(s => s.active).length,
                     fullscreen: document.fullscreenElement ? (document.fullscreenElement.id || document.fullscreenElement.className || true) : null,
+                    black: {
+                        total: blackTotal, spans: blackSpans.slice(-20),
+                        open: [...blackOpen.values()].map(s => ({ ...s, ms: Date.now() - s.start })),
+                    },
                 },
             };
         });
