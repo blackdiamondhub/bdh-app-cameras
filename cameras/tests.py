@@ -1763,6 +1763,13 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
         self.driver.get('about:blank')
         self.driver.delete_all_cookies()
 
+    def tearDown(self):
+        # Leave the camera page before Django flushes the DB: its timers keep
+        # hitting the live server, and a request racing the flush on the shared
+        # in-memory SQLite connection breaks it for every later test.
+        self.driver.get('about:blank')
+        super().tearDown()
+
     def test_camera_page_renders_video_streams_with_correct_mode(self):
         """video-stream elements start WebRTC-only with an MSE fallback."""
         from selenium.webdriver.common.by import By
