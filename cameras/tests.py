@@ -862,6 +862,11 @@ class CameraFeedViewFallbackTests(TestCase):
 class RegisterStreamsTests(TestCase):
     """Tests for _register_streams_with_go2rtc."""
 
+    def setUp(self):
+        from . import views
+        views._wanted.clear()
+        self.addCleanup(views._wanted.clear)
+
     @patch("cameras.views.urllib.request.urlopen")
     def test_registers_missing_streams(self, mock_urlopen):
         """Registers both high and low streams that don't exist in go2rtc."""
@@ -974,6 +979,118 @@ class RegisterStreamsTests(TestCase):
         mock_urlopen.side_effect = http_400(b'invalid source\n')
         with self.assertLogs('cameras.views', level='WARNING'):
             _put_stream('http://localhost:1984', 'front_door', 'rtsps://x')
+
+
+class StreamKeeperTests(TestCase):
+    """go2rtc has no config file, so a restart forgets every stream; the
+    keeper must put back the ones page loads registered."""
+
+    CAMS = [
+        {'name': 'Front Door', 'stream_name': 'front_door',
+         'rtsp_url': 'rtsps://host:7441/abc',
+         'rtsp_url_low': 'rtsps://host:7441/abc_low'},
+        {'name': 'Hot Tub', 'stream_name': 'hot_tub',
+         'rtsp_url': 'rtsps://host:7441/tub', 'rtsp_url_low': ''},
+    ]
+    URL = 'http://localhost:1984'
+
+    def setUp(self):
+        from . import views
+        self.views = views
+        views._wanted.clear()
+        self.addCleanup(views._wanted.clear)
+
+    def _listing(self, data):
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(data).encode()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = MagicMock(return_value=False)
+        return resp
+
+    def _all_present(self):
+        return {
+            'front_door': {'producers': [{'url': 'rtsps://host:7441/abc'}]},
+            'front_door_low': {'producers': [{'url': 'rtsps://host:7441/abc_low'}]},
+            'hot_tub': {'producers': [{'url': 'rtsps://host:7441/tub'}]},
+        }
+
+    @patch("cameras.views._put_stream")
+    @patch("cameras.views.urllib.request.urlopen")
+    def test_restores_streams_after_go2rtc_restart(self, mock_urlopen, mock_put):
+        mock_urlopen.return_value = self._listing(self._all_present())
+        _register_streams_with_go2rtc(self.URL, self.CAMS)
+        mock_put.assert_not_called()
+
+        # go2rtc restarted: its stream list is empty.
+        mock_urlopen.return_value = self._listing({})
+        with self.assertLogs('cameras.views', level='WARNING'):
+            self.views.keep_streams_once()
+
+        self.assertCountEqual(
+            [c.args for c in mock_put.call_args_list],
+            [(self.URL, 'front_door', 'rtsps://host:7441/abc'),
+             (self.URL, 'front_door_low', 'rtsps://host:7441/abc_low'),
+             (self.URL, 'hot_tub', 'rtsps://host:7441/tub')],
+        )
+
+    @patch("cameras.views._put_stream")
+    @patch("cameras.views.urllib.request.urlopen")
+    def test_restores_only_the_missing_stream(self, mock_urlopen, mock_put):
+        mock_urlopen.return_value = self._listing(self._all_present())
+        _register_streams_with_go2rtc(self.URL, self.CAMS)
+
+        partial = self._all_present()
+        del partial['hot_tub']
+        mock_urlopen.return_value = self._listing(partial)
+        with self.assertLogs('cameras.views', level='WARNING'):
+            self.views.keep_streams_once()
+        mock_put.assert_called_once_with(self.URL, 'hot_tub', 'rtsps://host:7441/tub')
+
+    @patch("cameras.views._put_stream")
+    @patch("cameras.views.urllib.request.urlopen")
+    def test_no_puts_when_everything_present(self, mock_urlopen, mock_put):
+        mock_urlopen.return_value = self._listing(self._all_present())
+        _register_streams_with_go2rtc(self.URL, self.CAMS)
+        with self.assertNoLogs('cameras.views', level='WARNING'):
+            self.views.keep_streams_once()
+        mock_put.assert_not_called()
+
+    @patch("cameras.views._put_stream")
+    @patch("cameras.views.urllib.request.urlopen")
+    def test_waits_while_go2rtc_is_down(self, mock_urlopen, mock_put):
+        """No PUT storm (and no warning per stream) while go2rtc is restarting."""
+        mock_urlopen.return_value = self._listing(self._all_present())
+        _register_streams_with_go2rtc(self.URL, self.CAMS)
+
+        mock_urlopen.side_effect = OSError("Connection refused")
+        self.views.keep_streams_once()
+        mock_put.assert_not_called()
+
+    @patch("cameras.views._put_stream")
+    @patch("cameras.views.urllib.request.urlopen")
+    def test_keeps_latest_source_after_token_rotation(self, mock_urlopen, mock_put):
+        mock_urlopen.return_value = self._listing(self._all_present())
+        _register_streams_with_go2rtc(self.URL, self.CAMS)
+        rotated = [dict(self.CAMS[1], rtsp_url='rtsps://host:7441/tub2')]
+        _register_streams_with_go2rtc(self.URL, rotated)
+        mock_put.reset_mock()
+
+        mock_urlopen.return_value = self._listing({})
+        with self.assertLogs('cameras.views', level='WARNING'):
+            self.views.keep_streams_once()
+        self.assertIn((self.URL, 'hot_tub', 'rtsps://host:7441/tub2'),
+                      [c.args for c in mock_put.call_args_list])
+        self.assertNotIn((self.URL, 'hot_tub', 'rtsps://host:7441/tub'),
+                         [c.args for c in mock_put.call_args_list])
+
+    def test_keeper_starts_once(self):
+        self.views._keeper_started = False
+        self.addCleanup(setattr, self.views, '_keeper_started', False)
+        with patch("cameras.views.threading.Thread") as thread:
+            self.views.start_stream_keeper()
+            self.views.start_stream_keeper()
+        thread.assert_called_once()
+        self.assertTrue(thread.call_args.kwargs['daemon'])
 
 
 # --- PTZ API tests ---
