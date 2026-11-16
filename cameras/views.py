@@ -17,7 +17,7 @@ from django.utils import timezone
 from django.views.decorators.clickjacking import xframe_options_sameorigin
 from django.views.decorators.http import require_GET, require_POST
 
-from . import config, events, frames, popups
+from . import clips, config, events, frames, popups
 from .models import ProtectEvent
 from .protect_api import get_protect_cameras, ptz_goto_preset
 
@@ -348,21 +348,23 @@ def clip(request, camera_id):
     end = min(end, start + CLIP_MAX, timezone.now())
     if end <= start:
         return JsonResponse({'error': 'start is in the future'}, status=400)
-    try:
-        data = events.run(
+
+    def export(path):
+        events.run(
             camera_id,
-            lambda client: client.get_camera_video(camera_id, start, end),
+            lambda client: client.get_camera_video(camera_id, start, end, output_file=path),
             timeout=90,
         )
+
+    try:
+        path = clips.get(camera_id, start, end, export, timeout=90)
     except events.WorkerUnavailable:
         return _unavailable()
     except Exception as err:
         return _unavailable(err)
-    if not data:
+    if path is None:
         raise Http404
-    resp = HttpResponse(data, content_type='video/mp4')
-    resp['Cache-Control'] = 'private, max-age=3600'
-    return resp
+    return clips.response(request, path, 'private, max-age=3600')
 
 
 @xframe_options_sameorigin

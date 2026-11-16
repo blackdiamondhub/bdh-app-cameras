@@ -17,7 +17,7 @@ own SQLite database at `/data`. It reaches the hub only through the broker RPC
 | `permissions` | `alerts`, `ha.read:*`, `events.subscribe:+/state/#` | Pop-ups, and Home Assistant triggers on any entity in any Home Assistant instance. |
 | `network` | `lan` | UniFi Protect (API and websocket) is on the LAN. |
 | `lifecycle` | `always` | The events worker keeps the last 24 hours of detections and fires pop-ups. |
-| `memory_mb` | 96 | About 63 MB in use with the events worker running. |
+| `memory_mb` | 128 | About 63 MB in use with the events worker running. Event clips are exported to a disk cache (`$BDH_DATA_DIR/clips`, at most 2 exports at a time, pruned after 1 hour or past 512 MB) and streamed from there, never buffered in memory. |
 | `companions` | `go2rtc` | Live video. The supervisor passes its URL in `BDH_GO2RTC_URL`. |
 
 The go2rtc companion's WebRTC port (8555) is bound on the host, because WebRTC over UDP

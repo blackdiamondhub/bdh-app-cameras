@@ -2077,11 +2077,21 @@ class HomepageStatusTests(TestCase):
 
 # --- Protect events (private API) ---
 
+import asyncio  # noqa: E402
+import os  # noqa: E402
+import tempfile  # noqa: E402
+import time  # noqa: E402
 from datetime import datetime, timedelta, timezone as dt_tz  # noqa: E402
 from django.utils import timezone as dj_tz  # noqa: E402
 from . import events as ev_mod  # noqa: E402
 from . import frames as frames_mod  # noqa: E402
 from .models import ProtectEvent  # noqa: E402
+
+
+def _body(resp):
+    async def drain():
+        return b"".join([chunk async for chunk in resp.streaming_content])
+    return asyncio.run(drain())
 
 
 def _ev(event_id, kinds, minutes_ago=5, camera_id="cam1", thumb=None):
@@ -2359,16 +2369,135 @@ class EventViewTests(TestCase):
 
     def test_clip_window_is_capped(self):
         client = MagicMock()
-        client.get_camera_video.return_value = b"mp4"
+        client.get_camera_video.side_effect = lambda cam, s, e, output_file: output_file.write_bytes(b"mp4")
         start = 1_700_000_000
-        with patch("cameras.views.events.run", side_effect=lambda cam, fn, **kw: fn(client)):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"BDH_DATA_DIR": tmp}), \
+                patch("cameras.views.events.run", side_effect=lambda cam, fn, **kw: fn(client)):
             resp = self._admin().get(f"/cameras/clip/cam1/?start={start}&end={start + 3600}")
             self.assertEqual(resp["Content-Type"], "video/mp4")
+            self.assertEqual(_body(resp), b"mp4")
             _, s, e = client.get_camera_video.call_args.args
             self.assertEqual((e - s).total_seconds(), 120)
             self.assertEqual(self._admin().get("/cameras/clip/cam1/").status_code, 400)
             future = int(dj_tz.now().timestamp()) + 600
             self.assertEqual(self._admin().get(f"/cameras/clip/cam1/?start={future}").status_code, 400)
+
+    def test_empty_clip_is_404(self):
+        client = MagicMock()
+        client.get_camera_video.side_effect = lambda cam, s, e, output_file: None
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"BDH_DATA_DIR": tmp}), \
+                patch("cameras.views.events.run", side_effect=lambda cam, fn, **kw: fn(client)):
+            self.assertEqual(self._admin().get("/cameras/clip/cam1/?start=1700000000").status_code, 404)
+            self.assertEqual(os.listdir(os.path.join(tmp, "clips")), [])
+
+
+from . import clips as clips_mod  # noqa: E402
+
+
+class ClipCacheTests(unittest.TestCase):
+    """Clips go to disk, not memory: an in-memory export OOM-killed the app."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        p = patch.dict("os.environ", {"BDH_DATA_DIR": tmp.name})
+        p.start()
+        self.addCleanup(p.stop)
+        self.start = datetime(2026, 11, 16, 12, 0, tzinfo=dt_tz.utc)
+        self.end = self.start + timedelta(seconds=30)
+
+    def _get(self, export, camera="cam1"):
+        return clips_mod.get(camera, self.start, self.end, export, timeout=5)
+
+    def test_export_is_cached(self):
+        calls = []
+
+        def export(path):
+            calls.append(path)
+            path.write_bytes(b"x" * 10)
+
+        first = self._get(export)
+        self.assertEqual(self._get(export), first)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(first.read_bytes(), b"x" * 10)
+        self.assertEqual([p.name for p in clips_mod.clip_dir().iterdir()], [first.name])
+
+    def test_failed_export_leaves_no_file(self):
+        def export(path):
+            path.write_bytes(b"partial")
+            raise RuntimeError("boom")
+
+        with self.assertRaises(RuntimeError):
+            self._get(export)
+        self.assertEqual(list(clips_mod.clip_dir().iterdir()), [])
+        self.assertEqual(clips_mod._exports._value, clips_mod.MAX_EXPORTS)
+
+    def test_camera_id_cannot_escape_the_folder(self):
+        path = self._get(lambda p: p.write_bytes(b"x"), camera="../../etc/passwd")
+        self.assertEqual(path.parent, clips_mod.clip_dir())
+
+    def test_concurrent_exports_are_capped(self):
+        import threading
+        running, peak, lock = [0], [0], threading.Lock()
+        release = threading.Event()
+
+        def export(path):
+            with lock:
+                running[0] += 1
+                peak[0] = max(peak[0], running[0])
+            release.wait(5)
+            with lock:
+                running[0] -= 1
+            path.write_bytes(b"x")
+
+        threads = [threading.Thread(target=clips_mod.get, args=(
+            f"cam{i}", self.start, self.end, export, 5)) for i in range(clips_mod.MAX_EXPORTS + 2)]
+        for t in threads:
+            t.start()
+        time.sleep(0.3)
+        self.assertEqual(peak[0], clips_mod.MAX_EXPORTS)
+        release.set()
+        for t in threads:
+            t.join(5)
+        self.assertEqual(len(list(clips_mod.clip_dir().glob("*.mp4"))), clips_mod.MAX_EXPORTS + 2)
+
+    def test_prune_drops_old_then_oldest_over_budget(self):
+        folder = clips_mod.clip_dir()
+        folder.mkdir(parents=True)
+        now = time.time()
+        for name, age in (("old.mp4", clips_mod.CACHE_SECONDS + 5), ("a.mp4", 30), ("b.mp4", 20), ("c.mp4", 10)):
+            (folder / name).write_bytes(b"x" * 100)
+            os.utime(folder / name, (now - age, now - age))
+        with patch.object(clips_mod, "CACHE_BYTES", 200):
+            clips_mod.prune(keep=folder / "a.mp4", now=now)
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), ["a.mp4", "c.mp4"])
+
+    def _serve(self, range_header=None):
+        from django.test import RequestFactory
+        path = self._get(lambda p: p.write_bytes(bytes(range(100))))
+        headers = {"HTTP_RANGE": range_header} if range_header else {}
+        return clips_mod.response(RequestFactory().get("/", **headers), path, "no-store")
+
+    def test_full_response(self):
+        resp = self._serve()
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["Content-Length"], "100")
+        self.assertEqual(resp["Accept-Ranges"], "bytes")
+        self.assertEqual(_body(resp), bytes(range(100)))
+
+    def test_range_responses(self):
+        for header, status, body, content_range in (
+                ("bytes=10-19", 206, bytes(range(10, 20)), "bytes 10-19/100"),
+                ("bytes=90-", 206, bytes(range(90, 100)), "bytes 90-99/100"),
+                ("bytes=-5", 206, bytes(range(95, 100)), "bytes 95-99/100"),
+                ("bytes=95-500", 206, bytes(range(95, 100)), "bytes 95-99/100")):
+            resp = self._serve(header)
+            self.assertEqual(resp.status_code, status, header)
+            self.assertEqual(resp["Content-Range"], content_range, header)
+            self.assertEqual(_body(resp), body, header)
+        resp = self._serve("bytes=100-")
+        self.assertEqual(resp.status_code, 416)
+        self.assertEqual(resp["Content-Range"], "bytes */100")
 
 
 @override_settings(
