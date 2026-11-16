@@ -14,7 +14,7 @@ own SQLite database at `/data`. It reaches the hub only through the broker RPC
 
 | Field | Value | Why |
 |---|---|---|
-| `permissions` | `alerts`, `ha.read:*`, `events.subscribe:ha/state/#` | Pop-ups, and Home Assistant triggers on any entity. |
+| `permissions` | `alerts`, `ha.read:*`, `events.subscribe:+/state/#` | Pop-ups, and Home Assistant triggers on any entity in any Home Assistant instance. |
 | `network` | `lan` | UniFi Protect (API and websocket) is on the LAN. |
 | `lifecycle` | `always` | The events worker keeps the last 24 hours of detections and fires pop-ups. |
 | `memory_mb` | 96 | About 63 MB in use with the events worker running. |

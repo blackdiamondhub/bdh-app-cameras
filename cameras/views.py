@@ -446,6 +446,7 @@ def rtc_diag(request):
 
 POPUP_STATES_TTL = 60
 POPUP_REGISTRY_TTL = 600
+POPUP_ENTITIES_KEY = "cameras:popup_entities3"
 # Domains whose entities are worth suggesting before the admin searches.
 _SUGGEST_DOMAINS = ("event", "lock")
 _SUGGEST_CLASSES = {"door", "garage_door", "opening", "window", "motion", "occupancy", "presence"}
@@ -737,19 +738,22 @@ def nvr_test(request):
     return JsonResponse(result)
 
 
-def _ha_registry():
-    """HA's entity/device/area registries, cached: ``{"entities": {entity_id: {area, device,
-    category}}, "devices": {device_id: {name, maker, area}}}``."""
+def _ha_registry(instance=None):
+    """An HA instance's entity/device/area registries, cached: ``{"entities": {entity_id:
+    {area, device, category}}, "devices": {device_id: {name, maker, area}}}``."""
     from django.core.cache import cache
 
-    reg = cache.get("cameras:popup_registry")
+    key = f"cameras:popup_registry:{instance or 'ha'}"
+    reg = cache.get(key)
     if reg is None:
         from bdh_sdk import ha
 
+        kw = {"instance": instance} if instance else {}
         entities, area_list, devices = ha.ws_commands(
             {"type": "config/entity_registry/list"},
             {"type": "config/area_registry/list"},
             {"type": "config/device_registry/list"},
+            **kw,
         )
         names = {a["area_id"]: a.get("name") or "" for a in area_list or []}
         devs = {}
@@ -767,7 +771,7 @@ def _ha_registry():
             category = e.get("entity_category") or ("hidden" if e.get("hidden_by") else "")
             ents[e["entity_id"]] = {"area": area, "device": device_id, "category": category}
         reg = {"entities": ents, "devices": devs}
-        cache.set("cameras:popup_registry", reg, POPUP_REGISTRY_TTL)
+        cache.set(key, reg, POPUP_REGISTRY_TTL)
     return reg
 
 
@@ -788,61 +792,90 @@ def _suggested(domain, device_class):
 @_settings_admin_only
 @require_GET
 def popup_entities(request):
-    """HA's entities and devices, for the trigger picker.
+    """Every Home Assistant instance's entities and devices, for the trigger picker.
 
-    ``entities``: ``[{id, name, short, area, state, domain, device_class, device, category,
-    useful, suggest}]``; ``devices``: ``[{id, name, maker, area}]`` (only ones with entities).
+    ``instances``: ``[{id, name, site, default}]`` (ones that answered);
+    ``entities``: ``[{id, instance, name, short, area, state, domain, device_class, device,
+    category, useful, suggest}]``; ``devices``: ``[{id, instance, name, maker, area}]`` (only
+    ones with entities).
     """
     from django.core.cache import cache
 
-    data = cache.get("cameras:popup_entities2")
+    data = cache.get(POPUP_ENTITIES_KEY)
     if data is None:
         from bdh_sdk import ha
 
         try:
-            states = ha.get_all_states()
+            instances = ha.instances() or []
         except (ha.HAError, BrokerError) as err:
-            logger.warning("Pop-ups: HA states unavailable: %s", err)
-            return JsonResponse({"error": "Home Assistant unavailable"}, status=503)
-        try:
-            reg = _ha_registry()
-        except (ha.HAError, BrokerError) as err:
-            # The registries need the admin-only ha.ws grant; fall back to states only.
-            logger.warning("Pop-ups: HA registries unavailable: %s", err)
-            reg = {"entities": {}, "devices": {}}
-        devices = reg["devices"]
-        entities, used = [], set()
-        for st in states:
-            entity_id = st.get("entity_id") or ""
-            if "." not in entity_id:
+            logger.warning("Pop-ups: HA instances unavailable: %s", err)
+            instances = []
+        if not instances:
+            instances = [{"id": "ha", "name": "Home Assistant", "site": "", "default": True}]
+        data = {"instances": [], "entities": [], "devices": []}
+        for inst in instances:
+            part = _instance_entities(inst["id"], inst.get("default"))
+            if part is None:
                 continue
-            attrs = st.get("attributes") or {}
-            domain = entity_id.split(".", 1)[0]
-            device_class = attrs.get("device_class") or ""
-            info = reg["entities"].get(entity_id) or {}
-            device_id = info.get("device") or ""
-            name = attrs.get("friendly_name") or entity_id
-            category = info.get("category") or ""
-            used.add(device_id)
-            entities.append({
-                "id": entity_id,
-                "name": name,
-                "short": _short_name(name, devices[device_id]["name"] if device_id else ""),
-                "area": info.get("area") or "",
-                "state": st.get("state") or "",
-                "domain": domain,
-                "device_class": device_class,
-                "device": device_id,
-                "category": category,
-                "useful": domain in _TRIGGER_DOMAINS and not category,
-                "suggest": _suggested(domain, device_class),
-            })
-        entities.sort(key=lambda e: (e["name"].lower(), e["id"]))
-        data = {
-            "entities": entities,
-            "devices": sorted(
-                ({"id": d, **devices[d]} for d in used if d),
-                key=lambda d: (d["name"].lower(), d["id"])),
-        }
-        cache.set("cameras:popup_entities2", data, POPUP_STATES_TTL)
+            data["instances"].append(
+                {k: inst.get(k) for k in ("id", "name", "site", "default")})
+            data["entities"] += part["entities"]
+            data["devices"] += part["devices"]
+        if not data["instances"]:
+            return JsonResponse({"error": "Home Assistant unavailable"}, status=503)
+        cache.set(POPUP_ENTITIES_KEY, data, POPUP_STATES_TTL)
     return JsonResponse(data)
+
+
+def _instance_entities(instance, default):
+    """``{entities, devices}`` for one HA instance, or None if it's unavailable."""
+    from bdh_sdk import ha
+
+    # The default instance is asked without ``instance`` so older hubs still answer.
+    kw = {} if default else {"instance": instance}
+    try:
+        states = ha.get_all_states(**kw)
+    except (ha.HAError, BrokerError) as err:
+        logger.warning("Pop-ups: HA %s states unavailable: %s", instance, err)
+        return None
+    try:
+        reg = _ha_registry(kw.get("instance"))
+    except (ha.HAError, BrokerError) as err:
+        # The registries need the admin-only ha.ws grant; fall back to states only.
+        logger.warning("Pop-ups: HA %s registries unavailable: %s", instance, err)
+        reg = {"entities": {}, "devices": {}}
+    devices = reg["devices"]
+    entities, used = [], set()
+    for st in states or []:
+        entity_id = st.get("entity_id") or ""
+        if "." not in entity_id:
+            continue
+        attrs = st.get("attributes") or {}
+        domain = entity_id.split(".", 1)[0]
+        device_class = attrs.get("device_class") or ""
+        info = reg["entities"].get(entity_id) or {}
+        device_id = info.get("device") or ""
+        name = attrs.get("friendly_name") or entity_id
+        category = info.get("category") or ""
+        used.add(device_id)
+        entities.append({
+            "id": entity_id,
+            "instance": instance,
+            "name": name,
+            "short": _short_name(name, devices[device_id]["name"] if device_id else ""),
+            "area": info.get("area") or "",
+            "state": st.get("state") or "",
+            "domain": domain,
+            "device_class": device_class,
+            "device": device_id,
+            "category": category,
+            "useful": domain in _TRIGGER_DOMAINS and not category,
+            "suggest": _suggested(domain, device_class),
+        })
+    entities.sort(key=lambda e: (e["name"].lower(), e["id"]))
+    return {
+        "entities": entities,
+        "devices": sorted(
+            ({"id": d, "instance": instance, **devices[d]} for d in used if d),
+            key=lambda d: (d["name"].lower(), d["id"])),
+    }

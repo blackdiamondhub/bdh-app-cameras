@@ -46,7 +46,7 @@ spec = PluginSpec(
     api_version=2,
     # Pop-ups: the trigger picker lists HA entities, any of them can trigger
     # a camera, and a detection or trigger pushes a hub alert.
-    permissions=("alerts", "ha.read:*", "events.subscribe:ha/state/#"),
+    permissions=("alerts", "ha.read:*", "events.subscribe:+/state/#"),
     # The UniFi Protect consoles and the go2rtc companion are on the LAN.
     network=NETWORK_LAN,
     # The Protect event workers keep a websocket per site open.

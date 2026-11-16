@@ -2460,6 +2460,18 @@ class EventPopupConfigTests(TestCase):
             "triggers": [{"entity_id": "lock.front", "to": "unlocked"}, {"entity_id": "event.ring"}]}}})
         self.assertEqual(popups_mod.clean("junk"), {"enabled": True, "cameras": {}})
 
+    def test_clean_instances(self):
+        cfg = popups_mod.clean({"cameras": {"cam1": {"kinds": [], "triggers": [
+            {"entity_id": "lock.gate", "instance": "ha"},
+            {"entity_id": "lock.gate"},
+            {"entity_id": "lock.gate", "instance": "cabin"},
+            {"entity_id": "lock.gate", "instance": "cabin"},
+            {"entity_id": "lock.shed", "instance": "Bad-Id"},
+            {"entity_id": "lock.shed", "instance": ""}]}}})
+        self.assertEqual(cfg["cameras"]["cam1"]["triggers"], [
+            {"entity_id": "lock.gate"}, {"entity_id": "lock.gate", "instance": "cabin"},
+            {"entity_id": "lock.shed"}])
+
     def test_clean_keeps_only_non_default_sounds(self):
         cfg = popups_mod.clean({"cameras": {"cam1": {
             "kinds": ["doorbell", "person", "vehicle"],
@@ -2532,6 +2544,16 @@ class PopupStoredConfigTests(TestCase):
         self.assertEqual([(a.as_dict()["key"], a.as_dict()["title"], a.as_dict()["sound"]) for a in self.pushed],
                          [("doorbell:cam2", "Gate unlocked", "knock-knock"),
                           ("doorbell:cam2", "Shed unlocked", "none")])
+
+    def test_trigger_on_other_instance(self):
+        popups_mod.start()
+        popups_mod.save({"cameras": {"cam2": {"kinds": [], "triggers": [
+            {"entity_id": "lock.gate", "instance": "cabin"}]}}})
+        self.events.publish("ha/state/lock.gate", {"entity_id": "lock.gate", "old": "locked", "new": "unlocked"})
+        self.events.publish("cabin/state/lock.gate", {"entity_id": "lock.gate", "old": "locked",
+                                                      "new": "unlocked", "attributes": {"friendly_name": "Gate"}})
+        self.events.flush(5)
+        self.assertEqual([a.as_dict()["title"] for a in self.pushed], ["Gate unlocked"])
 
     def test_master_switch_off(self):
         popups_mod.start()
@@ -2607,20 +2629,53 @@ class PopupSettingsViewTests(TestCase):
         with patch("bdh_sdk.ha.get_all_states", return_value=states), \
                 patch("bdh_sdk.ha.ws_commands", return_value=registries):
             data = self.client.get("/cameras/settings/popups/entities/").json()
-        door = {"domain": "binary_sensor", "device": "d1", "category": "", "useful": True, "suggest": True}
+        door = {"domain": "binary_sensor", "device": "d1", "category": "", "useful": True, "suggest": True,
+                "instance": "ha"}
         self.assertEqual(data["entities"], [
             {"id": "binary_sensor.front_door", "name": "Front Door", "short": "Front Door", "area": "Hall",
              "state": "off", "device_class": "door", **door},
             {"id": "sensor.front_door_battery", "name": "Front Door Battery", "short": "Battery", "area": "Hall",
              "state": "90", "domain": "sensor", "device_class": "", "device": "d1", "category": "diagnostic",
-             "useful": False, "suggest": False},
+             "useful": False, "suggest": False, "instance": "ha"},
             {"id": "binary_sensor.front_door_motion", "name": "Front Door Motion", "short": "Motion",
              "area": "Porch", "state": "off", "device_class": "motion", **door},
             {"id": "sensor.temp", "name": "sensor.temp", "short": "sensor.temp", "area": "Kitchen", "state": "20",
              "domain": "sensor", "device_class": "", "device": "", "category": "hidden", "useful": False,
-             "suggest": False},
+             "suggest": False, "instance": "ha"},
         ])
-        self.assertEqual(data["devices"], [{"id": "d1", "name": "Front door", "maker": "Ring", "area": "Hall"}])
+        self.assertEqual(data["devices"], [{"id": "d1", "name": "Front door", "maker": "Ring", "area": "Hall",
+                                            "instance": "ha"}])
+        self.assertEqual(data["instances"], [{"id": "ha", "name": "Home Assistant", "site": "", "default": True}])
+
+    def test_entities_several_instances(self):
+        from bdh_sdk import ha
+        self.is_admin = True
+        insts = [{"id": "ha", "name": "Home", "site": "Mercer Island", "default": True},
+                 {"id": "cabin", "name": "Cabin", "site": "Sun Peaks", "default": False},
+                 {"id": "barn", "name": "Barn", "site": "", "default": False}]
+
+        def states(instance=None):
+            if instance == "barn":
+                raise ha.HAError("down")
+            return [{"entity_id": "lock.gate", "state": "locked",
+                     "attributes": {"friendly_name": (instance or "home") + " gate"}}]
+
+        def ws(cmds, instance=None):
+            return [[{"entity_id": "lock.gate", "device_id": "g"}], [],
+                    [{"id": "g", "name": "Gate " + (instance or "home")}]]
+
+        with patch("bdh_sdk.ha.instances", return_value=insts), \
+                patch("bdh_sdk.ha.get_all_states", side_effect=states) as gs, \
+                patch("bdh_sdk.ha.ws_commands", side_effect=ws), \
+                self.assertLogs("cameras.views", "WARNING"):
+            data = self.client.get("/cameras/settings/popups/entities/").json()
+        # The default instance is asked without ``instance`` (older hubs).
+        self.assertEqual(gs.call_args_list[0], call())
+        self.assertEqual([i["id"] for i in data["instances"]], ["ha", "cabin"])
+        self.assertEqual([(e["instance"], e["id"], e["name"]) for e in data["entities"]],
+                         [("ha", "lock.gate", "home gate"), ("cabin", "lock.gate", "cabin gate")])
+        self.assertEqual([(d["instance"], d["name"]) for d in data["devices"]],
+                         [("ha", "Gate home"), ("cabin", "Gate cabin")])
 
     def test_entities_ha_down(self):
         from bdh_sdk import ha
