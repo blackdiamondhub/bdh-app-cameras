@@ -30,6 +30,32 @@ repainting animations stall WebRTC video decode. See README "Display performance
     await import(`${base}/video-stream.js`);
     await customElements.whenDefined('video-stream');
     const WEBRTC_TIMEOUT = 6000;
+    // Self-healing: a popup can stay open for minutes, and the stream may
+    // die underneath it (go2rtc restart, network blip, decoder stall).  If
+    // the video stops advancing for STALL_MS after it was live, or never
+    // gets going within START_MS, rebuild the player from scratch.
+    const STALL_MS = 8000;
+    const START_MS = 20000;
+    const BACKOFF_MAX_MS = 30000;
+    let restarts = 0;
+
+    // Background players don't tear down when removed from the DOM, so close
+    // the old element's WebSocket / peer connection explicitly.
+    function teardown(el) {
+        clearTimeout(el._tid);
+        clearInterval(el._poll);
+        clearInterval(el._dog);
+        clearTimeout(el.reconnectTID);
+        el.reconnectTID = 0;
+        el.ondisconnect();
+    }
+
+    function replace(el, mode) {
+        const next = el.cloneNode(false);
+        el.replaceWith(next);
+        teardown(el);
+        start(next, mode);
+    }
 
     // WebRTC only (running MSE alongside swaps the source mid-start and
     // flashes black).  If WebRTC isn't playing within WEBRTC_TIMEOUT, or the
@@ -40,33 +66,48 @@ repainting animations stall WebRTC video decode. See README "Display performance
         el.src = `${base}/api/ws?src=${encodeURIComponent(el.dataset.streamName)}`;
         const v = el.video;
         let live = false;
+        let lastTime = -1;
+        let lastProgress = Date.now();
         if (v) {
             v.muted = true;
             v.controls = false;
             v.playsInline = true;
-            v.addEventListener('playing', () => { live = true; document.body.dataset.state = 'live'; });
+            v.addEventListener('playing', () => { live = true; restarts = 0; document.body.dataset.state = 'live'; });
             v.addEventListener('waiting', () => { document.body.dataset.state = 'connecting'; });
         }
+        el._dog = setInterval(() => {
+            // a hidden page doesn't render frames; don't count that as a stall
+            if (document.visibilityState !== 'visible') { lastProgress = Date.now(); return; }
+            // a live MediaStream's currentTime keeps ticking with no frames,
+            // so prefer the decoded-frame count where the browser has it
+            const t = !v ? -1 : v.getVideoPlaybackQuality
+                ? v.getVideoPlaybackQuality().totalVideoFrames : v.currentTime;
+            if (t !== lastTime) { lastTime = t; if (live) lastProgress = Date.now(); }
+            const dead = live && el.pc && ['failed', 'closed'].includes(el.pc.connectionState);
+            const limit = live ? STALL_MS : START_MS;
+            if (!dead && Date.now() - lastProgress < limit) return;
+            clearInterval(el._dog);
+            document.body.dataset.state = 'connecting';
+            const delay = Math.min(1000 * 2 ** restarts, BACKOFF_MAX_MS);
+            restarts += 1;
+            console.warn(`Stream ${el.dataset.streamName} ${live ? 'stalled' : 'never started'}; restarting in ${delay} ms`);
+            // retry from the configured mode so WebRTC gets another chance
+            setTimeout(() => { if (el.isConnected) replace(el, el.dataset.mode); }, delay);
+        }, 1000);
         const fallback = el.dataset.fallbackMode;
         if (!fallback || fallback === mode) return;
         const fallBack = () => {
-            clearTimeout(tid);
-            clearInterval(poll);
+            clearTimeout(el._tid);
+            clearInterval(el._poll);
             if (live) return;
             console.warn(`WebRTC failed for ${el.dataset.streamName}; falling back to ${fallback}`);
-            const next = el.cloneNode(false);
-            el.replaceWith(next);
-            // background players don't tear down when removed; do it now
-            clearTimeout(el.reconnectTID);
-            el.reconnectTID = 0;
-            el.ondisconnect();
-            start(next, fallback);
+            replace(el, fallback);
         };
-        const tid = setTimeout(fallBack, WEBRTC_TIMEOUT);
-        const poll = setInterval(() => {
+        el._tid = setTimeout(fallBack, WEBRTC_TIMEOUT);
+        el._poll = setInterval(() => {
             if (live) {
-                clearTimeout(tid);
-                clearInterval(poll);
+                clearTimeout(el._tid);
+                clearInterval(el._poll);
             } else if (el.pc ? ['failed', 'closed'].includes(el.pc.connectionState)
                              : el.wsState === WebSocket.OPEN) {
                 // go2rtc nulls el.pc when the peer connection fails, and
