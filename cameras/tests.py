@@ -2565,6 +2565,62 @@ class PopupStoredConfigTests(TestCase):
         self.assertEqual(self.pushed, [])
 
 
+class PopupStartRetryTests(unittest.TestCase):
+    """Settings are read from the hub, which may still be starting: pop-ups
+    must keep trying rather than give up until the next settings save."""
+
+    TARGET = ("ha/state/binary_sensor.front_door", {"trigger": {"entity_id": "binary_sensor.front_door"},
+                                                    "camera_id": "cam1"})
+
+    def setUp(self):
+        from bdh_sdk import events
+        events.reset()
+        self.addCleanup(events.reset)
+        self.addCleanup(popups_mod.stop)
+        p = patch.object(popups_mod, "RETRY_FIRST", 0.01)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def wait_for(self, check, timeout=3.0):
+        import time
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if check():
+                return True
+            time.sleep(0.01)
+        return False
+
+    def test_retries_until_settings_readable(self):
+        from bdh_sdk import events
+        reads = [RuntimeError("hub starting"), RuntimeError("hub starting"), [self.TARGET]]
+        with patch.object(popups_mod, "_targets", side_effect=reads) as targets, \
+                self.assertLogs("cameras.popups", "WARNING"):
+            popups_mod.start()
+            self.assertTrue(self.wait_for(lambda: popups_mod._subscriptions))
+        self.assertEqual(targets.call_count, 3)
+        self.assertIn("ha/state/binary_sensor.front_door", events.patterns())
+
+    def test_stop_cancels_retry(self):
+        with patch.object(popups_mod, "_targets", side_effect=RuntimeError("down")) as targets, \
+                self.assertLogs("cameras.popups", "ERROR"):
+            popups_mod.start()
+            popups_mod.stop()
+            import time
+            time.sleep(0.1)
+        self.assertEqual(targets.call_count, 1)
+
+    def test_reload_supersedes_retry(self):
+        reads = [RuntimeError("hub starting"), [self.TARGET], [self.TARGET]]
+        with patch.object(popups_mod, "_targets", side_effect=reads) as targets, \
+                self.assertLogs("cameras.popups", "ERROR"):
+            popups_mod.start()
+            popups_mod.reload()  # e.g. a settings save before the retry fires
+            import time
+            time.sleep(0.1)
+        self.assertEqual(targets.call_count, 2)
+        self.assertEqual(len(popups_mod._subscriptions), 1)
+
+
 class PopupSettingsViewTests(TestCase):
     def setUp(self):
         from django.core.cache import cache
