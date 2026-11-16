@@ -104,7 +104,10 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         position: absolute; inset: 0; width: 100%; height: 100%;
         object-fit: cover; pointer-events: none;
     }
-    .cam-card:fullscreen .cam-poster { display: none; }
+    .cam-card:fullscreen .cam-poster { object-fit: contain; }
+    /* Hidden until it has presented real frames (see waitFrame), so a
+       starting stream never flashes black over the poster. */
+    .cam-card video-stream:not(.has-frame) video { opacity: 0; }
     .cam-card video::-webkit-media-controls { display: none !important; }
     /* go2rtc's built-in "MSE / loading" overlay */
     .cam-card video-stream .info { display: none !important; }
@@ -720,10 +723,10 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
             if (card.classList.contains('hi-live') === hi) card.dataset.state = state;
         };
         const live = () => {
+            waitFrame(el, () => { if (hi && el.dataset.active) revealHigh(el); });
             if (hi) {
                 if (!el.dataset.active) return;
                 el._live = true;
-                revealHigh(el);
             }
             set('live');
         };
@@ -731,10 +734,12 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         v.addEventListener('timeupdate', () => {
             if (v.paused) return;
             if (hi ? !el._live : card.dataset.state !== 'live') live();
+            else if (!el.classList.contains('has-frame')) waitFrame(el);
         });
         v.addEventListener('waiting', () => set('connecting'));
-        // 'emptied' is deliberately not here: it fires on every source swap
-        // (low -> high res, fallback), which isn't a stall.
+        // A new source has no frame yet: hide the element until it does.
+        // ('emptied' isn't a stall signal below: it fires on every source swap.)
+        v.addEventListener('emptied', () => el.classList.remove('has-frame'));
         ['stalled', 'error'].forEach(evt =>
             v.addEventListener(evt, () => {
                 if (el.dataset.active) set('reconnecting');
@@ -779,6 +784,110 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         }).catch(e => { report.statsErr = String(e); }).finally(send);
     }
 
+    // Calls cb once the stream has presented real frames and marks it
+    // .has-frame (CSS keeps it invisible until then).  A WebRTC track's first
+    // presented frame can be blank, so wait for the second.
+    function waitFrame(el, cb) {
+        const v = el.video;
+        if (!v) return;
+        if (el.classList.contains('has-frame')) { if (cb) cb(); return; }
+        if (cb) (el._frameCbs = el._frameCbs || []).push(cb);
+        if (el._frameWait) return;
+        const done = () => {
+            el._frameWait = false;
+            el.classList.add('has-frame');
+            const cbs = el._frameCbs || [];
+            el._frameCbs = [];
+            cbs.forEach(f => f());
+        };
+        if (!v.requestVideoFrameCallback) {
+            if (v.videoWidth) done();
+            return;
+        }
+        el._frameWait = true;
+        let seen = 0;
+        const check = () => {
+            if (!el._frameWait) return;
+            if (++seen >= 2 && v.videoWidth) done();
+            else v.requestVideoFrameCallback(check);
+        };
+        v.requestVideoFrameCallback(check);
+    }
+
+    // Per-tile watchdog.  go2rtc's player doesn't recover from everything (a
+    // peer connection the server closes, e.g. on a go2rtc restart, leaves it
+    // stuck), so restart any stream that never starts, whose peer connection
+    // died, or whose decoded frame count stops moving.  Backs off up to 30 s.
+    const WATCHDOG_MS = 2000;
+    const START_GRACE = 20000;
+    const STALL_MS = 10000;
+    const HEALTHY_MS = 30000;
+
+    function frameCount(v) {
+        const q = v && v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : null;
+        return q ? q.totalVideoFrames : v ? v.currentTime : 0;
+    }
+
+    function armWatchdog(el, src, url) {
+        clearInterval(el._watchdog);
+        const hi = el.classList.contains('cam-hi');
+        const card = el.closest('.cam-card');
+        let since = Date.now();
+        let lastFrames = -1;
+        let lastMove = since;
+        el._watchdog = setInterval(() => {
+            if (!el.dataset.active || el._streamUrl !== url) {
+                clearInterval(el._watchdog);
+                return;
+            }
+            const now = Date.now();
+            const v = el.video;
+            // Hidden pages and paused/replaying players aren't expected to decode
+            if (document.hidden || (v && v.paused && card.dataset.state === 'live')
+                    || card.classList.contains('replaying') || card.classList.contains('scrubbing')) {
+                since = lastMove = now;
+                return;
+            }
+            // The WebRTC -> fallback switch owns the first seconds
+            if (now - since < WEBRTC_TIMEOUT + 1000) return;
+            const live = hi ? el._live : card.dataset.state === 'live';
+            const frames = frameCount(v);
+            if (frames !== lastFrames) { lastFrames = frames; lastMove = now; }
+            let reason = null;
+            if (el.pc && ['closed', 'failed'].includes(el.pc.connectionState)) {
+                reason = 'pc-' + el.pc.connectionState;
+            } else if (!live) {
+                if (!hi && now - since > START_GRACE) reason = 'no-start';
+            } else if (now - lastMove > STALL_MS) {
+                reason = 'stall';
+            } else if (now - since > HEALTHY_MS) {
+                el._restarts = 0;
+            }
+            if (reason) restartStream(el, src, reason);
+        }, WATCHDOG_MS);
+    }
+
+    function restartStream(el, src, reason) {
+        const card = el.closest('.cam-card');
+        const hi = el.classList.contains('cam-hi');
+        const n = el._restarts = (el._restarts || 0) + 1;
+        console.warn(`Stream ${src}: ${reason}; restart #${n}`);
+        reportFallback(el, src, 'watchdog-' + reason);
+        if (hi) {
+            stopCard(card);
+        } else {
+            stopStream(el);
+            card.dataset.state = 'reconnecting';
+        }
+        clearTimeout(el._restartTID);
+        el._restartTID = setTimeout(() => {
+            const fs = document.fullscreenElement;
+            if (!card.closest('.site-panel.active') || (fs && fs !== card)) return;
+            if (fs === card) startFullscreen(card);
+            else if (!hi && !el.dataset.active) startStream(el, src);
+        }, Math.min(30000, 1000 * 2 ** Math.min(n - 1, 5)));
+    }
+
     // Start a stream WebRTC-only (no MSE warm-up, so no mid-start source
     // swap).  If WebRTC isn't playing within WEBRTC_TIMEOUT, or the peer
     // connection gives up, restart the tile on the fallback mode (MSE).
@@ -798,6 +907,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         el.src = url;
         el._streamUrl = url;
         el.dataset.active = 'true';
+        armWatchdog(el, src, url);
         if (!hi && (!fallback || fallback === el.mode)) return;
 
         const card = el.closest('.cam-card');
@@ -848,6 +958,10 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         if (!el.dataset.active) return;
         clearTimeout(el._fallbackTID);
         clearInterval(el._fallbackPoll);
+        clearInterval(el._watchdog);
+        clearTimeout(el._restartTID);
+        el._frameWait = false;
+        el._frameCbs = [];
         safeDisconnect(el);
         delete el.dataset.active;
     }
@@ -1063,8 +1177,10 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
             const panel = document.querySelector(`.site-panel[data-site="${siteIdx}"]`);
             panel.classList.add('active');
 
-            // Start streams on the new panel
-            initStreams(panel);
+            // Start streams on the new panel.  Next tick, so the old panel's
+            // socket close events can't clobber the new sockets (as on
+            // fullscreenchange).
+            setTimeout(() => initStreams(panel), 0);
         });
     });
 
@@ -1870,6 +1986,10 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
                     state: card ? card.dataset.state || null : null,
                     mode: el.mode || null,
                     pc: el.pc ? el.pc.connectionState : null,
+                    ws: el.ws ? el.ws.readyState : null,
+                    reconnecting: !!el.reconnectTID,
+                    hasFrame: el.classList.contains('has-frame'),
+                    restarts: el._restarts || 0,
                     video: v ? {
                         ready: v.readyState, paused: v.paused, w: v.videoWidth, h: v.videoHeight,
                         t: Math.round(v.currentTime * 10) / 10,
