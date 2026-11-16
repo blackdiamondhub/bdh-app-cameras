@@ -35,6 +35,8 @@
     .cp-trig i { font-style: normal; color: var(--mut); font-size: 13px; flex: none; }
     .cp-add { border: 1px dashed var(--line); background: transparent; color: var(--acc2); border-radius: 999px; padding: 6px 14px; font-size: 14px; cursor: pointer; font-family: inherit; }
     .cp-off .cp-cam { opacity: .45; }
+    .cp-hint { display: block; color: var(--mut); font-size: 13px; margin-top: 10px; }
+    .cp-stale { color: var(--warn, #ffd166); font-size: 13.5px; font-weight: 400; margin-left: 8px; }
     #cp-status { min-width: 80px; text-align: right; color: var(--mut); font-size: 14px; }
     #cp-status.bad { color: var(--red); }
     /* --hub-kb-h is the on-screen keyboard's height while it's open (set by the hub's keyboard.js),
@@ -72,13 +74,17 @@
         <h2>Pop-ups</h2>
         <p>Show a camera live on the hub screen when it sees something, or when something happens in Home Assistant.</p>
     </div>
-    <div class="act" style="flex-shrink:0"><a class="hst-btn ghost" style="display:flex;align-items:center;white-space:nowrap;text-decoration:none" href="{% url 'hub_settings_app' 'cameras' %}">‹ Cameras settings</a></div>
+    <div class="act" style="flex-shrink:0"><a class="hst-btn ghost" style="display:flex;align-items:center;white-space:nowrap;text-decoration:none" href="{% url 'cameras_settings' %}">‹ Cameras</a></div>
 </div>
 
 <div class="hst-card">
     <div class="hst-row">
-        <div class="lbl"><b>Pop-ups</b><small>Turn every camera pop-up on or off. How long they stay up is under Cameras settings.</small></div>
+        <div class="lbl"><b>Camera pop-ups</b><small>Turn every camera pop-up on or off.</small></div>
         <div class="ctl"><span id="cp-status" aria-live="polite"></span><label class="hst-tog"><input type="checkbox" id="cp-enabled" aria-label="Pop-ups on"><span></span></label></div>
+    </div>
+    <div class="hst-row">
+        <div class="lbl"><b>Stays up for</b><small>Then it closes on its own.</small></div>
+        <div class="ctl"><input type="number" inputmode="numeric" class="hst-in num" id="cp-seconds" aria-label="Seconds a pop-up stays up"><span class="hst-unit">s</span></div>
     </div>
 </div>
 
@@ -109,7 +115,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const page = JSON.parse(document.getElementById('cp-data').textContent);
     const cfg = page.config;
     const csrf = document.querySelector('[name=csrfmiddlewaretoken]').value;
-    const KIND_LABEL = {doorbell: 'Ring', person: 'Person', vehicle: 'Vehicle', package: 'Package', animal: 'Animal'};
+    const KIND_LABEL = Object.assign({}, page.labels, {doorbell: 'Ring'});
     // States offered in the "when it" list; other domains get a text box.
     const STATES = {
         binary_sensor: ['on', 'off'], lock: ['unlocked', 'locked', 'open', 'jammed'],
@@ -213,12 +219,24 @@ document.addEventListener('DOMContentLoaded', function () {
     enabled.checked = cfg.enabled;
     enabled.addEventListener('change', () => { cfg.enabled = enabled.checked; sitesEl.classList.toggle('cp-off', !cfg.enabled); save(); });
     sitesEl.classList.toggle('cp-off', !cfg.enabled);
+    const secs = document.getElementById('cp-seconds');
+    secs.min = page.seconds_min; secs.max = page.seconds_max; secs.value = cfg.seconds;
+    secs.addEventListener('change', () => {
+        const v = Math.round(Number(secs.value));
+        if (!Number.isFinite(v) || secs.value === '') { secs.value = cfg.seconds; return; }
+        cfg.seconds = Math.min(page.seconds_max, Math.max(page.seconds_min, v));
+        secs.value = cfg.seconds;
+        save();
+    });
 
     function renderCam(cam) {
         const c = camCfg(cam.id);
         const row = el('div', {className: 'hst-row cp-cam'});
         const tiles = el('div', {className: 'cp-tiles', role: 'group', ariaLabel: cam.name + ' detections'});
-        page.kinds.filter(k => k !== 'doorbell' || cam.doorbell).forEach(k => {
+        // Only detections that are on for this camera in Protect (plus any already picked, so they can be turned off).
+        const camKinds = page.kinds.filter(k => cam.enabled.includes(k) || c.kinds.includes(k));
+        const offInProtect = page.kinds.filter(k => cam.supported.includes(k) && !camKinds.includes(k));
+        camKinds.forEach(k => {
             const tile = el('div', {className: 'cp-tile'});
             const ck = el('span', {className: 'cp-ck', ariaHidden: 'true'});
             const head = el('button', {type: 'button'}, el('span', {textContent: KIND_LABEL[k]}), ck);
@@ -242,10 +260,15 @@ document.addEventListener('DOMContentLoaded', function () {
             tile.append(head, body);
             sync(); tiles.append(tile);
         });
+        const note = !camKinds.length
+            ? 'This camera has no smart detections, so it can only pop up from a Home Assistant trigger'
+            : (cam.doorbell ? 'Doorbell · pops up when it detects' : 'Pops up when it detects');
         row.append(el('div', {className: 'top'},
-            el('div', {className: 'lbl'}, el('b', {textContent: cam.name}),
-               el('small', {textContent: cam.doorbell ? 'Doorbell · pops up when it detects' : 'Pops up when it detects'}))),
-            tiles);
+            el('div', {className: 'lbl'}, el('b', {textContent: cam.name}), el('small', {textContent: note}))));
+        if (camKinds.length) row.append(tiles);
+        if (offInProtect.length) {
+            row.append(el('small', {className: 'cp-hint', textContent: 'Also available, off in Protect: ' + offInProtect.map(k => KIND_LABEL[k]).join(', ')}));
+        }
         const also = el('div', {className: 'cp-also'}, el('small', {textContent: 'Also pop up when'}));
         c.triggers.forEach((t, i) => {
             const e = byId[K(t.instance, t.entity_id)] || stub(t.entity_id, t.instance), v = verb(e, t.to);
@@ -272,7 +295,8 @@ document.addEventListener('DOMContentLoaded', function () {
         }
         page.sites.forEach(site => {
             const card = el('div', {className: 'hst-card'});
-            if (page.sites.length > 1 || site.name) card.append(el('h3', {textContent: site.name || 'Cameras'}));
+            if (page.sites.length > 1 || site.name) card.append(el('h3', {textContent: site.name || 'Cameras'},
+                site.stale ? el('span', {className: 'cp-stale', textContent: '· showing last-known detections'}) : null));
             site.cameras.forEach(cam => card.append(renderCam(cam)));
             sitesEl.append(card);
         });
