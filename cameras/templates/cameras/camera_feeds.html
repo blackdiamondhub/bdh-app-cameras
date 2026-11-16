@@ -1988,6 +1988,17 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         if (e.pointerType === 'mouse' && scrubbers.has(document.fullscreenElement)) showChrome();
     }, { passive: true });
     document.addEventListener('fullscreenchange', showChrome);
+    // A replay that pauses after the chrome hid (a stall, a new clip that never
+    // starts) would leave no controls; bring them back unless it resumes quickly.
+    document.addEventListener('pause', e => {
+        const card = document.fullscreenElement;
+        const s = scrubbers.get(card);
+        if (!s || e.target !== s.video || !card.classList.contains('chrome-hidden')) return;
+        setTimeout(() => {
+            if (document.fullscreenElement === card && s.mode === 'replay'
+                && s.video.paused && !s.video.ended) showChrome();
+        }, 1000);
+    }, true);
     // Paused replay keeps the scrubber up; resuming restarts the idle timer.
     for (const type of ['pause', 'play']) {
         document.addEventListener(type, e => {
