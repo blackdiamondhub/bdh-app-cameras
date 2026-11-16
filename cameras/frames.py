@@ -59,21 +59,18 @@ def clear():
         _live.clear()
 
 
-def warm(camera_id, ts, data, width):
-    """Cache ``data`` at the other WARM_WIDTHS (only when ``width`` is one of them)."""
-    if width not in WARM_WIDTHS:
-        return
-    for w in WARM_WIDTHS:
-        key = (camera_id, ts, w)
-        if w == width or get(key) is not None:
-            continue
-        small = resize(data, w)
-        if small is not data:
-            put(key, small)
+def render(camera_id, ts, data, width):
+    """Return the full-size frame ``data`` at ``width`` and cache it.
 
-
-def warm_async(camera_id, ts, data, width):
-    threading.Thread(target=warm, args=(camera_id, ts, data, width), daemon=True).start()
+    A warm width also caches the other WARM_WIDTHS from the same decode, so a
+    scrub costs one decode per frame, not one per width.
+    """
+    widths = WARM_WIDTHS if width in WARM_WIDTHS else (width,)
+    out = resize_many(data, widths)
+    for w, small in out.items():
+        if w == width or small is not data:
+            put((camera_id, ts, w), small)
+    return out[width]
 
 
 # Live stills are only card posters (shown until the stream's first frame). A
@@ -154,20 +151,43 @@ def _warm_loop(fetch):
                     _refresh_async(key, fetch)
 
 
+# Each decode holds a few MB of pixels; a fast scrub fires many requests at
+# once, and unbounded decodes pushed the 128 MiB container into the OOM killer.
+DECODE_SLOTS = 2
+_decode_slots = threading.BoundedSemaphore(DECODE_SLOTS)
+
+
 def resize(data, width):
     """Downscale a JPEG to ``width`` px wide; returns the input if it's already small."""
-    try:
-        from PIL import Image
+    return resize_many(data, (width,))[width]
 
-        img = Image.open(io.BytesIO(data))
-        if img.width <= width:
-            return data
-        img.draft('RGB', (width, img.height * width // img.width))
-        img = img.convert('RGB')
-        img.thumbnail((width, img.height * width // img.width), Image.LANCZOS)
-        out = io.BytesIO()
-        img.save(out, 'JPEG', quality=80, optimize=True)
-        return out.getvalue()
-    except Exception as err:
-        logger.warning("Could not resize snapshot; serving original: %s", err)
-        return data
+
+def resize_many(data, widths):
+    """Downscale a JPEG to each of ``widths`` from one decode -> {width: bytes}.
+
+    Widths the image is already within map to the input unchanged.
+    """
+    widths = sorted(set(widths), reverse=True)
+    result = {}
+    with _decode_slots:
+        try:
+            from PIL import Image
+
+            img = Image.open(io.BytesIO(data))
+            smaller = [w for w in widths if img.width > w]
+            if smaller:
+                first = smaller[0]
+                img.draft('RGB', (first, img.height * first // img.width))
+                img = img.convert('RGB')
+                # Largest first: each thumbnail shrinks ``img`` in place, so the
+                # smaller widths are cut from the previous result.
+                for w in smaller:
+                    img.thumbnail((w, img.height * w // img.width), Image.LANCZOS)
+                    out = io.BytesIO()
+                    img.save(out, 'JPEG', quality=80, optimize=True)
+                    result[w] = out.getvalue()
+        except Exception as err:
+            logger.warning("Could not resize snapshot; serving original: %s", err)
+    for w in widths:
+        result.setdefault(w, data)
+    return result
