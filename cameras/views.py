@@ -375,9 +375,7 @@ def snapshot(request, camera_id):
     if not data:
         raise Http404
     if key is not None:
-        frames.warm_async(camera_id, key[1], data, width)
-        data = frames.resize(data, width)
-        frames.put(key, data)
+        data = frames.render(camera_id, key[1], data, width)
     resp = HttpResponse(data, content_type='image/jpeg')
     resp['Cache-Control'] = 'private, max-age=3600' if dt else 'no-store'
     return resp

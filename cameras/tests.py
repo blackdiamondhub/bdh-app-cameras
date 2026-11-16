@@ -2443,8 +2443,7 @@ class EventViewTests(TestCase):
         Image.new("RGB", (2688, 1512), (40, 90, 160)).save(buf, "JPEG")
         client = MagicMock()
         client.get_camera_snapshot.return_value = buf.getvalue()
-        with patch("cameras.views.events.run", side_effect=lambda cam, fn, **kw: fn(client)), \
-                patch("cameras.views.frames.warm_async", side_effect=frames_mod.warm):
+        with patch("cameras.views.events.run", side_effect=lambda cam, fn, **kw: fn(client)):
             c = self._admin()
             card = c.get("/cameras/snapshot/cam1/?ts=1700000002&w=320")
             full = c.get("/cameras/snapshot/cam1/?ts=1700000004&w=1280")
@@ -2454,6 +2453,51 @@ class EventViewTests(TestCase):
         self.assertEqual(client.get_camera_snapshot.call_count, 2)  # the 1280 came from cache
         self.assertEqual(client.get_camera_snapshot.call_args_list[0].kwargs["width"], 1280)
         self.assertIsNone(frames_mod.get(("cam1", 1_700_000_100, 320)))
+
+    def test_warm_widths_share_one_decode(self):
+        import io
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (2688, 1512), (40, 90, 160)).save(buf, "JPEG")
+        real_open = Image.open
+        with patch("PIL.Image.open", side_effect=real_open) as opened:
+            out = frames_mod.resize_many(buf.getvalue(), (320, 1280))
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual(Image.open(io.BytesIO(out[1280])).size, (1280, 720))
+        self.assertEqual(Image.open(io.BytesIO(out[320])).size, (320, 180))
+
+    def test_concurrent_resizes_are_bounded(self):
+        import io
+        import threading
+        import time as time_mod
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (640, 360)).save(buf, "JPEG")
+        real_open = Image.open
+        lock = threading.Lock()
+        state = {"now": 0, "peak": 0}
+
+        def slow_open(*a, **kw):
+            with lock:
+                state["now"] += 1
+                state["peak"] = max(state["peak"], state["now"])
+            time_mod.sleep(0.05)
+            with lock:
+                state["now"] -= 1
+            return real_open(*a, **kw)
+
+        with patch("PIL.Image.open", side_effect=slow_open):
+            threads = [threading.Thread(target=frames_mod.resize, args=(buf.getvalue(), 160))
+                       for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(state["peak"], frames_mod.DECODE_SLOTS)
+
+    def test_undecodable_frame_is_served_as_is(self):
+        self.assertEqual(frames_mod.resize_many(b"not a jpeg", (320, 1280)),
+                         {320: b"not a jpeg", 1280: b"not a jpeg"})
 
     def test_live_snapshot_is_cached_and_refreshed_in_background(self):
         client = MagicMock()
