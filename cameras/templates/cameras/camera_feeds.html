@@ -544,8 +544,9 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     {% for stream in site.streams %}
     <div class="cam-card{% if site.hero and forloop.first %} hero{% endif %}" data-state="connecting" data-camera-id="{{ stream.camera_id }}" data-name="{{ stream.display_name }}">
             {% if is_admin and stream.camera_id %}
-            {# Other sites' panels are hidden; lazy defers their stills until shown. #}
-            <img class="cam-poster" alt="" src="{% url 'camera_snapshot' stream.camera_id %}?w=640"{% if not forloop.parentloop.first %} loading="lazy"{% endif %}>
+            {# Cached stills are inlined (see _inline_posters) so they paint with the page;
+               the others' stills load eagerly too, so switching site never shows black. #}
+            <img class="cam-poster" alt="" src="{% if stream.poster %}{{ stream.poster }}{% else %}{% url 'camera_snapshot' stream.camera_id %}?w=640{% endif %}">
             {% endif %}
         <video-stream
             data-stream-name="{{ stream.name }}"

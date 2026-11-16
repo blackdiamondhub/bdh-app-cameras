@@ -109,6 +109,17 @@ def live_get(key, fetch, now=None):
     return data
 
 
+def live_peek(key, now=None):
+    """The cached live still for ``key`` (never fetches), or None."""
+    now = time.monotonic() if now is None else now
+    with _live_lock:
+        entry = _live.get(key)
+        if entry is None or now - entry[0] > LIVE_MAX_AGE:
+            return None
+        entry[2] = now
+        return entry[1]
+
+
 def _refresh(key, fetch):
     try:
         data = fetch(key)
