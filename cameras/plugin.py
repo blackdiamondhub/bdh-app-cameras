@@ -32,6 +32,8 @@ spec = PluginSpec(
     network=NETWORK_LAN,
     # The Protect event workers keep a websocket per site open.
     lifecycle=LIFECYCLE_ALWAYS,
-    memory_mb=128,
+    # Scrubbing decodes Protect snapshots in bursts on top of a ~70-100 MiB
+    # baseline; 128 left no headroom and the OOM killer took the app mid-scrub.
+    memory_mb=192,
     companions=("go2rtc",),
 )
