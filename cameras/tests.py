@@ -2660,7 +2660,7 @@ class PopupSettingsViewTests(TestCase):
             return [{"entity_id": "lock.gate", "state": "locked",
                      "attributes": {"friendly_name": (instance or "home") + " gate"}}]
 
-        def ws(cmds, instance=None):
+        def ws(*cmds, instance=None):
             return [[{"entity_id": "lock.gate", "device_id": "g"}], [],
                     [{"id": "g", "name": "Gate " + (instance or "home")}]]
 
