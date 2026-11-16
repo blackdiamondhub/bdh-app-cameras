@@ -2746,6 +2746,22 @@ class EventTemplateTests(TestCase):
 
     @patch("cameras.views._register_streams_with_go2rtc")
     @patch("cameras.views.get_protect_cameras")
+    def test_cached_poster_is_inlined(self, mock_cameras, _):
+        import time
+        from cameras import frames
+        mock_cameras.return_value = self.CAMS
+        cached = {("cam1", 640): [time.monotonic(), b"jpg", 0]}
+        with patch("cameras.views.is_admin", return_value=True), \
+                patch.dict(frames._live, cached, clear=True):
+            html = Client().get("/cameras/").content.decode()
+            stale = {("cam1", 640): [time.monotonic() - frames.LIVE_MAX_AGE - 1, b"jpg", 0]}
+            with patch.dict(frames._live, stale, clear=True):
+                old = Client().get("/cameras/").content.decode()
+        self.assertIn('<img class="cam-poster" alt="" src="data:image/jpeg;base64,anBn">', html)
+        self.assertIn('src="/cameras/snapshot/cam1/?w=640"', old)
+
+    @patch("cameras.views._register_streams_with_go2rtc")
+    @patch("cameras.views.get_protect_cameras")
     def test_popup_is_public_and_live_only(self, mock_cameras, mock_register):
         mock_cameras.return_value = self.CAMS
         resp = Client().get("/cameras/popup/cam1/")

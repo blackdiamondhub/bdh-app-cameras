@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 import re
@@ -193,6 +194,23 @@ def _with_hero(streams):
     return [streams[idx]] + streams[:idx] + streams[idx + 1:], True
 
 
+POSTER_W = 640
+
+
+def _inline_posters(streams):
+    """Embed cached posters so they paint with the page.
+
+    A separate request for each still lands a few hundred ms after the
+    page, often after the stream's first frame is due, and the card is
+    black until then. Uncached stills fall back to the snapshot URL.
+    """
+    for stream in streams:
+        if stream.get('camera_id'):
+            data = frames.live_peek((stream['camera_id'], POSTER_W))
+            if data:
+                stream['poster'] = 'data:image/jpeg;base64,' + base64.b64encode(data).decode()
+
+
 def camera_feed_view(request):
     """Display camera feeds via go2rtc, with tabs for multiple sites.
 
@@ -245,11 +263,15 @@ def camera_feed_view(request):
     from urllib.parse import urlparse
     go2rtc_port = urlparse(go2rtc_url).port or 1984
 
+    admin = is_admin(request)
+    if admin and sites:
+        _inline_posters(sites[0]['streams'])
+
     return render(request, 'cameras/camera_feeds.html', {
         'sites': sites,
         'go2rtc_url': go2rtc_url,
         'go2rtc_port': go2rtc_port,
-        'is_admin': is_admin(request),
+        'is_admin': admin,
         'event_kinds': [(k, config.KIND_SHORT[k]) for k in config.enabled_event_kinds()],
         'kind_labels': json.dumps(config.KIND_SHORT),
         'keep_open': config.keep_open(),
