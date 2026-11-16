@@ -1853,6 +1853,41 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     }
 </script>
 {% endif %}
+<script>
+    // Per-stream state for the hub's remote `frame state` command (bdh-sdk 0.33+),
+    // so a soak can check that tiles are live and decoding.
+    window.addEventListener('DOMContentLoaded', () => {
+        if (!window.bdh || !window.bdh.stats) return;
+        window.bdh.stats(() => {
+            const streams = [...document.querySelectorAll('video-stream')].map(el => {
+                const v = el.video;
+                const card = el.closest('.cam-card');
+                const q = v && v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : null;
+                return {
+                    name: el.dataset.streamName || (card && card.querySelector('video-stream:not(.cam-hi)')?.dataset.streamName) || null,
+                    hi: el.classList.contains('cam-hi'),
+                    active: !!el.dataset.active,
+                    state: card ? card.dataset.state || null : null,
+                    mode: el.mode || null,
+                    pc: el.pc ? el.pc.connectionState : null,
+                    video: v ? {
+                        ready: v.readyState, paused: v.paused, w: v.videoWidth, h: v.videoHeight,
+                        t: Math.round(v.currentTime * 10) / 10,
+                        frames: q ? q.totalVideoFrames : null, dropped: q ? q.droppedVideoFrames : null,
+                    } : null,
+                };
+            });
+            return {
+                cameras: {
+                    streams,
+                    live: streams.filter(s => s.active && s.state === 'live').length,
+                    active: streams.filter(s => s.active).length,
+                    fullscreen: document.fullscreenElement ? (document.fullscreenElement.id || document.fullscreenElement.className || true) : null,
+                },
+            };
+        });
+    });
+</script>
 {% if keep_open %}
 <script>
     // In the hub's iframe the hub can't see the bdh-screensaver meta, so keep it awake
