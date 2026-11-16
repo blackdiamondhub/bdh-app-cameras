@@ -31,6 +31,8 @@ just restarts its timer.
 """
 import logging
 import re
+import threading
+import time
 
 from django.db import close_old_connections
 
@@ -62,6 +64,10 @@ _INSTANCE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 DEFAULT_INSTANCE = "ha"
 _subscriptions = []
 _started = False
+_generation = 0  # bumped by start/stop so a stale retry gives up
+_lock = threading.RLock()
+RETRY_FIRST = 5.0
+RETRY_MAX = 300.0
 
 
 def kind_sound(kind):
@@ -254,34 +260,66 @@ def _targets():
 
 
 def start():
-    """Subscribe to every trigger's event topic."""
-    global _started
-    _started = True
+    """Subscribe to every trigger's event topic. If the settings can't be read
+    yet (the hub is still starting), keep trying in the background."""
+    global _started, _generation
+    with _lock:
+        _started = True
+        _generation += 1
+        generation = _generation
+        if _subscribe(first=True):
+            return
+    threading.Thread(target=_retry, args=(generation,), name="cameras-popups-retry", daemon=True).start()
+
+
+def _retry(generation):
+    wait = RETRY_FIRST
+    while True:
+        time.sleep(wait)
+        try:
+            with _lock:
+                if generation != _generation or not _started:
+                    return  # stopped or reloaded meanwhile
+                if _subscribe():
+                    return
+        finally:
+            close_old_connections()
+        wait = min(wait * 2, RETRY_MAX)
+
+
+def _subscribe(first=False):
+    """Subscribe to the current triggers; False if the settings couldn't be read."""
     try:
         targets = _targets()
-    except Exception:
-        logger.exception("Could not read the pop-up settings")
-        return
+    except Exception as err:
+        if first:
+            logger.exception("Could not read the pop-up settings; retrying")
+        else:
+            logger.warning("Could not read the pop-up settings: %s", err)
+        return False
     if not targets:
-        return
+        return True
     try:
         from bdh_sdk import events
     except ImportError:
         logger.warning("bdh_sdk.events not available; no event pop-ups")
-        return
+        return True
     for pattern, kwargs in targets:
         try:
             _subscriptions.append(events.subscribe(pattern, lambda e, kw=kwargs: handle(e, **kw)))
         except ValueError as err:
             logger.warning("Pop-ups: %s", err)
     logger.info("Camera pop-ups for %d event topic(s)", len(_subscriptions))
+    return True
 
 
 def stop():
-    global _started
-    _started = False
-    while _subscriptions:
-        _subscriptions.pop().cancel()
+    global _started, _generation
+    with _lock:
+        _started = False
+        _generation += 1
+        while _subscriptions:
+            _subscriptions.pop().cancel()
 
 
 def reload():
