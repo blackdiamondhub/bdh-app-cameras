@@ -2495,6 +2495,46 @@ class EventViewTests(TestCase):
                 t.join()
         self.assertEqual(state["peak"], frames_mod.DECODE_SLOTS)
 
+    def test_heap_is_trimmed_once_a_burst_of_decodes_ends(self):
+        import io
+        import threading
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (640, 360)).save(buf, "JPEG")
+        real_open = Image.open
+        release = threading.Event()
+        started = threading.Semaphore(0)
+
+        def held_open(*a, **kw):
+            started.release()
+            release.wait(5)
+            return real_open(*a, **kw)
+
+        libc = MagicMock()
+        with patch.object(frames_mod, "_libc", libc), \
+                patch("PIL.Image.open", side_effect=held_open):
+            threads = [threading.Thread(target=frames_mod.resize, args=(buf.getvalue(), 160))
+                       for _ in range(frames_mod.DECODE_SLOTS)]
+            for t in threads:
+                t.start()
+            for _ in threads:
+                started.acquire(timeout=5)
+            libc.malloc_trim.assert_not_called()  # nothing freed mid-burst
+            release.set()
+            for t in threads:
+                t.join()
+        # Whichever decode finishes last trims; a concurrent one may also see 0.
+        self.assertGreaterEqual(libc.malloc_trim.call_count, 1)
+        self.assertLessEqual(libc.malloc_trim.call_count, len(threads))
+        self.assertEqual(frames_mod._decoding, 0)
+
+    def test_failed_decode_still_trims(self):
+        libc = MagicMock()
+        with patch.object(frames_mod, "_libc", libc):
+            frames_mod.resize_many(b"not a jpeg", (320,))
+        libc.malloc_trim.assert_called_once_with(0)
+        self.assertEqual(frames_mod._decoding, 0)
+
     def test_undecodable_frame_is_served_as_is(self):
         self.assertEqual(frames_mod.resize_many(b"not a jpeg", (320, 1280)),
                          {320: b"not a jpeg", 1280: b"not a jpeg"})

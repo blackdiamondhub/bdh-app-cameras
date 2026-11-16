@@ -155,6 +155,36 @@ def _warm_loop(fetch):
 # once, and unbounded decodes pushed the 128 MiB container into the OOM killer.
 DECODE_SLOTS = 2
 _decode_slots = threading.BoundedSemaphore(DECODE_SLOTS)
+_decoding = 0
+_decoding_lock = threading.Lock()
+
+# Pillow allocates pixels in big blocks. After the first big free glibc raises
+# its mmap threshold, so later blocks come from the heap and stay there,
+# fragmented: the app's baseline crept from ~68 to ~106 MiB over a soak, which
+# left a scrub's transient decodes no room under the limit. A fixed threshold
+# keeps big blocks mmapped (returned on free); a trim after each burst of
+# decodes hands back what the heap kept anyway.
+M_MMAP_THRESHOLD = -3
+MMAP_THRESHOLD = 128 * 1024
+
+
+def _load_libc():
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6")
+        libc.mallopt(M_MMAP_THRESHOLD, MMAP_THRESHOLD)
+        return libc
+    except (OSError, AttributeError):
+        return None  # not glibc (tests on Windows/macOS)
+
+
+_libc = _load_libc()
+
+
+def _trim():
+    if _libc is not None:
+        _libc.malloc_trim(0)
 
 
 def resize(data, width):
@@ -167,27 +197,42 @@ def resize_many(data, widths):
 
     Widths the image is already within map to the input unchanged.
     """
+    global _decoding
     widths = sorted(set(widths), reverse=True)
     result = {}
     with _decode_slots:
+        with _decoding_lock:
+            _decoding += 1
         try:
-            from PIL import Image
-
-            img = Image.open(io.BytesIO(data))
-            smaller = [w for w in widths if img.width > w]
-            if smaller:
-                first = smaller[0]
-                img.draft('RGB', (first, img.height * first // img.width))
-                img = img.convert('RGB')
-                # Largest first: each thumbnail shrinks ``img`` in place, so the
-                # smaller widths are cut from the previous result.
-                for w in smaller:
-                    img.thumbnail((w, img.height * w // img.width), Image.LANCZOS)
-                    out = io.BytesIO()
-                    img.save(out, 'JPEG', quality=80, optimize=True)
-                    result[w] = out.getvalue()
+            _decode_into(data, widths, result)
         except Exception as err:
             logger.warning("Could not resize snapshot; serving original: %s", err)
+        finally:
+            with _decoding_lock:
+                _decoding -= 1
+                idle = _decoding == 0
+        # The pixels are freed once _decode_into returns; trim when the burst
+        # ends rather than after every frame of a scrub.
+        if idle:
+            _trim()
     for w in widths:
         result.setdefault(w, data)
     return result
+
+
+def _decode_into(data, widths, result):
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(data))
+    smaller = [w for w in widths if img.width > w]
+    if smaller:
+        first = smaller[0]
+        img.draft('RGB', (first, img.height * first // img.width))
+        img = img.convert('RGB')
+        # Largest first: each thumbnail shrinks ``img`` in place, so the
+        # smaller widths are cut from the previous result.
+        for w in smaller:
+            img.thumbnail((w, img.height * w // img.width), Image.LANCZOS)
+            out = io.BytesIO()
+            img.save(out, 'JPEG', quality=80, optimize=True)
+            result[w] = out.getvalue()
