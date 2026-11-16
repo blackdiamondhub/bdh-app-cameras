@@ -358,7 +358,8 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
 {% if is_admin %}
     /* ---- Admin: "Last 24 hours" events rail ---- */
     :root { --rail-w: 340px; --k-person: #4d9be6; --k-vehicle: #8f7ae6; --k-animal: #6fb84f;
-            --k-doorbell: #a8582a; --k-package: #c9a227; --k-motion: #7d8ea6; --replay: #f0a030; }
+            --k-doorbell: #a8582a; --k-package: #c9a227; --k-motion: #7d8ea6; --replay: #f0a030;
+            --k-smoke: #e0524a; --k-co: #d9822b; --k-baby: #d77fb8; --k-speaking: #3fb6b0; }
     @media (min-width: 1201px) {
         body.has-rail .camera-grid, body.has-rail .sitebar { margin-right: var(--rail-w); margin-left: 0; max-width: none; }
     }
@@ -612,8 +613,8 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     <div class="ev-rail-head"><h2>LAST 24 HOURS</h2><span class="ev-count"></span><button type="button" class="ev-toggle" aria-label="Collapse events" aria-expanded="true"><i class="fas fa-chevron-right"></i></button></div>
     <div class="ev-chips">
         <button type="button" class="ev-chip active" data-kind="">All</button>
-        {% for kind in event_kinds %}
-        <button type="button" class="ev-chip" data-kind="{{ kind }}" style="--c: var(--k-{{ kind }})"><span class="dot"></span>{{ kind|capfirst }}</button>
+        {% for kind, label in event_kinds %}
+        <button type="button" class="ev-chip" data-kind="{{ kind }}" style="--c: var(--k-{{ kind }})"><span class="dot"></span>{{ label }}</button>
         {% endfor %}
     </div>
     <div class="ev-list-wrap">
@@ -1182,8 +1183,8 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     const THUMB_URL = id => '{% url "camera_event_thumb" "EVID" %}'.replace('EVID', encodeURIComponent(id));
     const SNAP_URL = (cam, ts, w = 1280) => '{% url "camera_snapshot" "CAMID" %}'.replace('CAMID', encodeURIComponent(cam)) + `?ts=${ts}&w=${w}`;
     const CLIP_URL = (cam, s, e) => '{% url "camera_clip" "CAMID" %}'.replace('CAMID', encodeURIComponent(cam)) + `?start=${s}&end=${e}`;
-    const KIND_ORDER = ['doorbell', 'person', 'vehicle', 'package', 'animal', 'motion'];
-    const KIND_LABEL = {doorbell: 'Doorbell', person: 'Person', vehicle: 'Vehicle', package: 'Package', animal: 'Animal', motion: 'Motion'};
+    const KIND_ORDER = ['smoke', 'co', 'doorbell', 'person', 'vehicle', 'package', 'animal', 'baby', 'speaking', 'motion'];
+    const KIND_LABEL = {{ kind_labels|safe }};
     const CHUNK_S = 30;
     const H = 3600 * 1000;
     const SNAP_PX = 24;   // tap within this many px of an event mark snaps to its start

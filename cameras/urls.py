@@ -10,6 +10,7 @@ urlpatterns = [
     path('snapshot/<str:camera_id>/', views.snapshot, name='camera_snapshot'),
     path('clip/<str:camera_id>/', views.clip, name='camera_clip'),
     path('popup/<str:camera_id>/', views.popup, name='camera_popup'),
+    path('settings/', views.main_settings, name='cameras_settings'),
     path('settings/popups/', views.popup_settings, name='cameras_popups'),
     path('settings/popups/entities/', views.popup_entities, name='cameras_popup_entities'),
     path('settings/nvrs/', views.nvr_settings, name='cameras_nvrs'),

@@ -2685,6 +2685,133 @@ class PopupSettingsViewTests(TestCase):
             self.assertEqual(self.client.get("/cameras/settings/popups/entities/").status_code, 503)
 
 
+def _det_cam(camera_id, enabled, supported=None, doorbell=False):
+    return {"camera_id": camera_id, "name": camera_id.title(), "is_doorbell": doorbell,
+            "detections": {"enabled": enabled, "supported": supported or enabled}}
+
+
+class DetectionTests(TestCase):
+    def setUp(self):
+        from bdh_sdk.storage import app_state
+        self.state = app_state("cameras")
+        for key in (_config_mod.SETTINGS_KEY, _config_mod.DETECTIONS_KEY, popups_mod.STATE_KEY):
+            self.addCleanup(self.state.delete, key)
+
+    def test_protect_kinds_objects_and_audio(self):
+        self.assertEqual(_config_mod.protect_kinds(["alrmSpeak", "face", "smoke_cmonx", "nope", "car"]),
+                         ["person", "vehicle", "smoke", "co", "speaking"])
+        self.assertEqual(ev_mod.kinds_for("smartAudioDetect", ["alrmBabyCry"]), ["baby"])
+
+    def test_camera_detections(self):
+        from .protect_api import _detections
+        cam = {"featureFlags": {"smartDetectTypes": ["person", "vehicle"], "smartDetectAudioTypes": ["alrmSmoke"]},
+               "smartDetectSettings": {"objectTypes": ["person"], "audioTypes": []}}
+        self.assertEqual(_detections(cam, True), {"supported": ["doorbell", "person", "vehicle", "motion", "smoke"],
+                                                  "enabled": ["doorbell", "person", "motion"]})
+        self.assertEqual(_detections({}, False), {"supported": ["motion"], "enabled": ["motion"]})
+
+    def test_remember_detections(self):
+        _config_mod.remember_detections("1", [_det_cam("a", ["person"]), {"camera_id": "b"}])
+        self.assertEqual(_config_mod.known_detections(), {"1": [
+            {"id": "a", "name": "A", "doorbell": False, "enabled": ["person"], "supported": ["person"]}]})
+
+    def test_settings_fall_back_to_old_flat_settings(self):
+        with patch("cameras.config.app_setting", side_effect=lambda app, key, default, **kw: {
+                "show_animal": True, "show_person": False, "keep_open": False,
+                "video_transport": "udp", "popup_seconds": 5}.get(key, default)):
+            self.assertEqual(_config_mod.enabled_event_kinds(), ["doorbell", "vehicle", "package", "animal"])
+            self.assertFalse(_config_mod.keep_open())
+            self.assertEqual(_config_mod.video_transport(), "udp")
+            self.assertEqual(_config_mod.popup_seconds(), 10)
+            _config_mod.save_settings(events=["co", "person"], keep_open=True, video_transport="tcp")
+            self.state.set(popups_mod.STATE_KEY, {"seconds": 90})
+            self.assertEqual(_config_mod.enabled_event_kinds(), ["person", "co"])
+            self.assertTrue(_config_mod.keep_open())
+            self.assertEqual(_config_mod.video_mode(), "webrtc/tcp")
+            self.assertEqual(_config_mod.popup_seconds(), 90)
+
+    def test_popup_seconds_clamped(self):
+        self.assertEqual(popups_mod.clean({"seconds": 5000})["seconds"], 600)
+        self.assertEqual(popups_mod.clean({"seconds": "20"})["seconds"], 20)
+        self.assertNotIn("seconds", popups_mod.clean({"seconds": "x"}))
+
+    def test_unreachable_nvr_uses_last_known_detections(self):
+        from .views import _detection_sites
+        _config_mod.remember_detections("1", [_det_cam("a", ["person", "motion"])])
+        sites = [{"id": "1", "name": "Home", "ok": False, "cameras": []},
+                 {"id": "2", "name": "Cabin", "ok": True, "cameras": [_det_cam("b", ["vehicle"])]},
+                 {"id": "3", "name": "Barn", "ok": True, "cameras": [{"camera_id": "c", "is_doorbell": True}]}]
+        with patch("cameras.views.get_protect_cameras", return_value=sites):
+            out = _detection_sites()
+        self.assertEqual([(s["id"], s["stale"], [(c["id"], c["enabled"]) for c in s["cameras"]]) for s in out],
+                         [("1", True, [("a", ["person", "motion"])]),
+                          ("2", False, [("b", ["vehicle"])]),
+                          ("3", True, [("c", ["doorbell", "motion"])])])
+
+
+class MainSettingsViewTests(TestCase):
+    URL = "/cameras/settings/"
+    SITES = [{"id": "1", "name": "Home", "ok": True, "cameras": [
+        _det_cam("front", ["doorbell", "person", "motion"], doorbell=True), _det_cam("drive", ["vehicle", "motion"])]}]
+
+    def setUp(self):
+        from bdh_sdk.storage import app_state
+        self.state = app_state("cameras")
+        for key in (_config_mod.SETTINGS_KEY, _config_mod.DETECTIONS_KEY, popups_mod.STATE_KEY):
+            self.addCleanup(self.state.delete, key)
+        self.is_admin = True
+        self.nvrs = [{"id": "1", "name": "Home", "host": "10.0.0.1", "username": "",
+                      "has_api_key": True, "has_password": False}]
+        for target, kw in (
+            ("cameras.views.is_admin", {"side_effect": lambda request: self.is_admin}),
+            ("cameras.views._nvr_rows", {"side_effect": lambda: [dict(n) for n in self.nvrs]}),
+            ("cameras.views.get_protect_cameras", {"return_value": self.SITES}),
+            ("cameras.protect_api.get_protect_cameras", {"return_value": self.SITES}),
+        ):
+            p = patch(target, **kw)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def page(self):
+        resp = self.client.get(self.URL)
+        self.assertEqual(resp.status_code, 200)
+        return resp.context["page"]
+
+    def post(self, body):
+        return self.client.post(self.URL, json.dumps(body), content_type="application/json")
+
+    def test_admins_only(self):
+        self.is_admin = False
+        self.assertEqual(self.client.get(self.URL).status_code, 404)
+        self.assertEqual(self.post({"keep_open": False}).status_code, 404)
+
+    def test_kinds_come_from_the_nvr(self):
+        page = self.page()
+        self.assertEqual([(k["id"], k["cameras"]) for k in page["kinds"]],
+                         [("doorbell", 1), ("person", 1), ("vehicle", 1), ("motion", 2)])
+        self.assertEqual((page["nvrs"][0]["cameras"], page["nvrs"][0]["ok"]), (2, True))
+        self.assertEqual(page["popups"], {"enabled": True, "cameras": 1, "seconds": 60})
+
+    def test_no_nvr(self):
+        self.nvrs = []
+        page = self.page()
+        self.assertEqual((page["nvrs"], page["kinds"]), ([], []))
+        self.assertContains(self.client.get(self.URL), "Needs an NVR")
+
+    def test_save_keeps_picks_not_on_the_page(self):
+        _config_mod.save_settings(events=["person", "smoke"])
+        resp = self.post({"events": ["vehicle"], "shown": ["doorbell", "person", "vehicle", "motion"]})
+        self.assertEqual(resp.json()["events"], ["vehicle", "smoke"])
+        self.assertEqual(self.post({"keep_open": False, "video_transport": "udp"}).status_code, 200)
+        self.assertEqual((_config_mod.keep_open(), _config_mod.video_transport(),
+                          _config_mod.enabled_event_kinds()), (False, "udp", ["vehicle", "smoke"]))
+
+    def test_save_rejects_junk(self):
+        self.assertEqual(self.client.post(self.URL, "{nope", content_type="application/json").status_code, 400)
+        self.assertEqual(self.post({"video_transport": "carrier-pigeon", "keep_open": "yes"}).status_code, 400)
+        self.assertEqual(_config_mod.settings(), {})
+
+
 # --- In the app container: everything goes through the hub broker ---
 
 

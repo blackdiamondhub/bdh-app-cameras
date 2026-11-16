@@ -29,13 +29,7 @@ THUMB_SIZE = 360
 TIMEOUT = 30
 TABLE_WAIT = 60
 
-_SMART_KIND = {
-    "person": "person", "face": "person",
-    "vehicle": "vehicle", "licensePlate": "vehicle", "car": "vehicle",
-    "package": "package",
-    "animal": "animal", "pet": "animal",
-}
-_SMART_TYPES = {"smartDetectZone", "smartDetectLine"}
+_SMART_TYPES = {"smartDetectZone", "smartDetectLine", "smartAudioDetect"}
 
 _workers = {}
 _started = False
@@ -51,12 +45,7 @@ def kinds_for(event_type, smart_types):
     if event_type == "ring":
         return ["doorbell"]
     if event_type in _SMART_TYPES:
-        kinds = []
-        for t in smart_types or ():
-            kind = _SMART_KIND.get(t)
-            if kind and kind not in kinds:
-                kinds.append(kind)
-        return kinds
+        return config.protect_kinds(smart_types)
     if event_type == "motion" and not smart_types:
         # Motion events with smart types duplicate their smartDetect event.
         return ["motion"]
@@ -165,7 +154,10 @@ def prune():
     return ProtectEvent.objects.filter(start__lt=djtz.now() - HISTORY).delete()[0]
 
 
-_KIND_LABEL = {"person": "Person", "vehicle": "Vehicle", "package": "Package", "animal": "Animal"}
+_KIND_LABEL = {
+    "person": "Person", "vehicle": "Vehicle", "package": "Package", "animal": "Animal",
+    "smoke": "Smoke alarm", "co": "CO alarm", "baby": "Baby crying", "speaking": "Speaking",
+}
 
 
 def popup_title(kind, camera_name):
@@ -326,7 +318,8 @@ class SiteWorker:
         end = datetime.now(timezone.utc)
         raw = await client.get_events_raw(
             start=end - HISTORY, end=end,
-            types=[EventType.RING, EventType.MOTION, EventType.SMART_DETECT, EventType.SMART_DETECT_LINE],
+            types=[EventType.RING, EventType.MOTION, EventType.SMART_DETECT, EventType.SMART_DETECT_LINE,
+                   EventType.SMART_AUDIO_DETECT],
         )
         rows = [r for r in (normalize_raw(e) for e in raw) if r]
         missing = await self._in_db(_save, self.site, self.host, self.names, rows)

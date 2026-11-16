@@ -202,7 +202,8 @@ def camera_feed_view(request):
         'go2rtc_url': go2rtc_url,
         'go2rtc_port': go2rtc_port,
         'is_admin': is_admin(request),
-        'event_kinds': config.enabled_event_kinds(),
+        'event_kinds': [(k, config.KIND_SHORT[k]) for k in config.enabled_event_kinds()],
+        'kind_labels': json.dumps(config.KIND_SHORT),
         'keep_open': config.keep_open(),
         'video_mode': config.video_mode(),
     })
@@ -469,6 +470,41 @@ def _settings_admin_only(view):
     return wrapped
 
 
+def _camera_rows(cams):
+    return [
+        {"id": c["camera_id"], "name": c.get("name") or c["camera_id"],
+         "doorbell": bool(c.get("is_doorbell")),
+         "enabled": list(c["detections"].get("enabled", [])),
+         "supported": list(c["detections"].get("supported", []))}
+        for c in cams if c.get("camera_id") and isinstance(c.get("detections"), dict)
+    ]
+
+
+def _detection_sites():
+    """Each NVR's cameras and the detections they have on in Protect.
+
+    ``[{id, name, ok, stale, cameras: [{id, name, doorbell, enabled, supported}]}]``.
+    When an NVR can't be reached, its cameras are the last ones seen (``stale``).
+    """
+    known = config.known_detections()
+    out = []
+    for site in get_protect_cameras():
+        live = site.get("cameras") or []
+        rows = _camera_rows(live)
+        stale = not site.get("ok", True) or len(rows) < len([c for c in live if c.get("camera_id")])
+        if stale:
+            rows = known.get(site.get("id")) or [
+                {"id": c["camera_id"], "name": c.get("name") or c["camera_id"],
+                 "doorbell": bool(c.get("is_doorbell")),
+                 "enabled": (["doorbell"] if c.get("is_doorbell") else []) + ["motion"],
+                 "supported": []}
+                for c in live if c.get("camera_id")
+            ]
+        out.append({"id": site.get("id"), "name": site.get("name") or "",
+                    "ok": site.get("ok", True), "stale": stale, "cameras": rows})
+    return out
+
+
 @_settings_admin_only
 def popup_settings(request):
     if request.method == "POST":
@@ -479,14 +515,9 @@ def popup_settings(request):
         return JsonResponse(popups.save(raw))
     sites = []
     try:
-        for site in get_protect_cameras():
-            cams = [
-                {"id": c["camera_id"], "name": c.get("name") or c["camera_id"],
-                 "doorbell": bool(c.get("is_doorbell"))}
-                for c in site.get("cameras", []) if c.get("camera_id")
-            ]
-            if cams:
-                sites.append({"name": site.get("name") or "", "cameras": cams})
+        for site in _detection_sites():
+            if site["cameras"]:
+                sites.append({"name": site["name"], "stale": site["stale"], "cameras": site["cameras"]})
     except Exception:
         logger.exception("Could not list cameras for the pop-ups page")
     try:
@@ -494,15 +525,87 @@ def popup_settings(request):
     except Exception:
         logger.exception("Could not read the pop-up settings")
         cfg = popups.clean({})
+    cfg.setdefault("seconds", config.popup_seconds())
     return render(request, "cameras/settings_popups.html", {
         "active": "cameras",
         "page": {
             "sites": sites, "config": cfg, "kinds": list(popups.POPUP_KINDS),
+            "labels": {k: config.KIND_LABELS[k] for k in popups.POPUP_KINDS},
+            "seconds_min": config.POPUP_SECONDS_MIN, "seconds_max": config.POPUP_SECONDS_MAX,
             "chimes": list(popups.CHIMES), "silent": popups.SILENT,
             "kind_sounds": {k: popups.kind_sound(k) for k in popups.POPUP_KINDS},
             "trigger_sound": popups.TRIGGER_SOUND,
             "save_url": request.path,
             "entities_url": reverse("cameras_popup_entities"),
+        },
+    })
+
+
+@_settings_admin_only
+def main_settings(request):
+    if request.method == "POST":
+        raw = _json_body(request)
+        if raw is None:
+            return JsonResponse({"error": "bad JSON"}, status=400)
+        changes = {}
+        if isinstance(raw.get("events"), list):
+            # Only the kinds on the page change; picks for kinds no camera has now are kept.
+            shown = raw.get("shown") if isinstance(raw.get("shown"), list) else config.EVENT_KINDS
+            current = config.enabled_event_kinds()
+            changes["events"] = [
+                k for k in config.EVENT_KINDS
+                if k in raw["events"] or (k in current and k not in shown)
+            ]
+        if isinstance(raw.get("keep_open"), bool):
+            changes["keep_open"] = raw["keep_open"]
+        if raw.get("video_transport") in ("tcp", "udp"):
+            changes["video_transport"] = raw["video_transport"]
+        if not changes:
+            return JsonResponse({"error": "nothing to save"}, status=400)
+        config.save_settings(**changes)
+        return JsonResponse({"ok": True, **changes})
+
+    try:
+        nvrs, error = _nvr_rows(), ""
+    except Exception:
+        logger.exception("Could not read the NVRs")
+        nvrs, error = [], "Couldn't read the NVRs. Try again in a minute."
+    sites = []
+    if nvrs:
+        try:
+            sites = _detection_sites()
+        except Exception:
+            logger.exception("Could not list cameras for the settings page")
+    by_id = {s["id"]: s for s in sites}
+    for n in nvrs:
+        site = by_id.get(n["id"])
+        n["cameras"] = len(site["cameras"]) if site else 0
+        n["ok"] = bool(site and site["ok"])
+    counts = {}
+    for site in sites:
+        for cam in site["cameras"]:
+            for k in cam["enabled"]:
+                counts[k] = counts.get(k, 0) + 1
+    kinds = [
+        {"id": k, "label": label, "group": group, "cameras": counts[k]}
+        for k, (label, group, _) in config.KINDS.items() if counts.get(k)
+    ]
+    try:
+        pcfg = popups.current()
+    except Exception:
+        logger.exception("Could not read the pop-up settings")
+        pcfg = popups.clean({})
+    return render(request, "cameras/settings_main.html", {
+        "active": "cameras",
+        "page": {
+            "nvrs": nvrs, "error": error,
+            "unreachable": [s["name"] for s in sites if not s["ok"]],
+            "kinds": kinds, "events": config.enabled_event_kinds(),
+            "popups": {"enabled": pcfg["enabled"], "cameras": len(pcfg["cameras"]),
+                       "seconds": config.popup_seconds()},
+            "keep_open": config.keep_open(), "video_transport": config.video_transport(),
+            "save_url": request.path,
+            "nvrs_url": reverse("cameras_nvrs"), "popups_url": reverse("cameras_popups"),
         },
     })
 

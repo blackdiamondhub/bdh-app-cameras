@@ -6,6 +6,7 @@ Admins choose these on the Pop-ups settings page, which saves app state
 ``popups``::
 
     {"enabled": true,
+     "seconds": 60,
      "cameras": {"<camera_id>": {
          "kinds": ["doorbell", "person"],
          "sounds": {"person": "none"},
@@ -38,7 +39,7 @@ from . import config
 logger = logging.getLogger(__name__)
 
 # Protect detections a camera can pop up for, in display order.
-POPUP_KINDS = ("doorbell", "person", "vehicle", "package", "animal")
+POPUP_KINDS = ("doorbell", "person", "vehicle", "package", "animal", "smoke", "co", "baby", "speaking")
 STATE_KEY = "popups"
 # State a trigger fires on when it has no ``to``; other domains fire on any change.
 DEFAULT_TO = {"binary_sensor": "on", "lock": "unlocked"}
@@ -49,7 +50,8 @@ except ImportError:  # bdh-sdk < 0.17
     CHIMES = ("ding-dong", "soft-bell", "rising-trio", "notify", "westminster", "glass-ping", "low-pulse",
               "knock-knock", "ding-dong-ding", "harp-sweep", "kalimba", "single-ding")
     SILENT = "none"
-KIND_SOUNDS = {"doorbell": "ding-dong", "person": "notify"}
+KIND_SOUNDS = {"doorbell": "ding-dong", "person": "notify", "smoke": "low-pulse", "co": "low-pulse",
+               "baby": "soft-bell"}
 OTHER_KIND_SOUND = "single-ding"
 TRIGGER_SOUND = "knock-knock"
 
@@ -112,7 +114,12 @@ def clean(raw):
             entry["sounds"] = sounds
         if entry["kinds"] or entry["triggers"]:
             cameras[camera_id] = entry
-    return {"enabled": raw.get("enabled", True) is not False, "cameras": cameras}
+    out = {"enabled": raw.get("enabled", True) is not False, "cameras": cameras}
+    try:
+        out["seconds"] = min(config.POPUP_SECONDS_MAX, max(config.POPUP_SECONDS_MIN, int(raw["seconds"])))
+    except (KeyError, TypeError, ValueError):
+        pass
+    return out
 
 
 def stored():

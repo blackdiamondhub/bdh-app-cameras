@@ -68,10 +68,11 @@ def get_protect_cameras():
     """Fetch cameras from all configured UniFi Protect sites, with caching.
 
     Returns a list of site dicts:
-        [{'name': 'Sun Peaks', 'cameras': [...]}, ...]
+        [{'id': '1', 'name': 'Sun Peaks', 'host': ..., 'cameras': [...], 'ok': True}, ...]
 
-    Each camera dict has: name, camera_id, stream_name, rtsp_url,
-    is_ptz, ptz_presets.
+    ``ok`` is False when the site couldn't be reached. Each camera dict has:
+    name, camera_id, stream_name, rtsp_url, is_ptz, ptz_presets, is_doorbell
+    and detections (``{'supported': [...], 'enabled': [...]}``, our kinds).
     Returns an empty list if no sites are configured.
     """
     sites = config.protect_sites()
@@ -89,9 +90,11 @@ def get_protect_cameras():
         if cached is not None:
             logger.info("Camera cache HIT for %s", host)
             result_map[i] = {
+                'id': site.get('id'),
                 'name': site.get('name', host),
                 'host': host,
                 'cameras': cached,
+                'ok': True,
             }
         else:
             logger.info("Camera cache MISS for %s", host)
@@ -116,16 +119,24 @@ def get_protect_cameras():
                 host = site['host']
                 site_name = site.get('name', host)
                 cameras, complete = f.result()
-                if cameras is not None:
+                ok = cameras is not None
+                if ok:
                     cache_key = f'{CACHE_KEY_PREFIX}{host}'
                     ttl = CACHE_TTL if complete else INCOMPLETE_CACHE_TTL
                     django_cache.set(cache_key, cameras, ttl)
+                    if complete and site.get('id'):
+                        try:
+                            config.remember_detections(site['id'], cameras)
+                        except Exception:
+                            logger.exception("Could not store the detections for %s", host)
                 else:
                     cameras = []
                 result_map[i] = {
+                    'id': site.get('id'),
                     'name': site_name,
                     'host': host,
                     'cameras': cameras,
+                    'ok': ok,
                 }
         logger.info("Fetched cameras from %d site(s) in %.1fs",
                     len(to_fetch), time.time() - t0)
@@ -298,6 +309,25 @@ def _is_ptz_camera(host, api_key, camera_id, camera_type=''):
     return None
 
 
+def _detections(camera, is_doorbell):
+    """What a camera can detect (``supported``) and has turned on in Protect (``enabled``), as our kinds.
+
+    A doorbell always rings and every camera sees motion.
+    """
+    flags = camera.get('featureFlags') or {}
+    smart = camera.get('smartDetectSettings') or {}
+    base = (['doorbell'] if is_doorbell else []) + ['motion']
+    supported = config.protect_kinds(
+        list(flags.get('smartDetectTypes') or []) + list(flags.get('smartDetectAudioTypes') or []))
+    enabled = config.protect_kinds(
+        list(smart.get('objectTypes') or []) + list(smart.get('audioTypes') or []))
+    order = config.EVENT_KINDS
+    return {
+        'supported': [k for k in order if k in base or k in supported],
+        'enabled': [k for k in order if k in base or k in enabled],
+    }
+
+
 def _fetch_cameras_from_site(host, api_key, site_name=None):
     """Like _fetch_cameras_from_site_ex but returns only the camera list."""
     return _fetch_cameras_from_site_ex(host, api_key, site_name)[0]
@@ -343,6 +373,7 @@ def _fetch_cameras_from_site_ex(host, api_key, site_name=None):
 
         # Build basic camera info (no RTSPS yet)
         pending = []
+        detections = {}
         for camera in cameras_data:
             name = camera.get('name', 'Unknown')
             camera_id = camera.get('id')
@@ -355,6 +386,8 @@ def _fetch_cameras_from_site_ex(host, api_key, site_name=None):
             else:
                 stream_name = _camera_name_to_stream_name(name)
             pending.append((camera_id, name, stream_name, camera.get('type', '')))
+            detections[camera_id] = _detections(
+                camera, 'doorbell' in (camera.get('type') or '').lower())
 
         # Fetch RTSPS URLs and probe PTZ in a single parallel pass
         cameras = []
@@ -388,6 +421,7 @@ def _fetch_cameras_from_site_ex(host, api_key, site_name=None):
                         'is_ptz': False,
                         'ptz_presets': 0,
                         'is_doorbell': 'doorbell' in types.get(camera_id, '').lower(),
+                        'detections': detections[camera_id],
                     }
                 else:
                     complete = False

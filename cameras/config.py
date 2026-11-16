@@ -92,16 +92,69 @@ def protect_sites():
     return [dict(s) for s in sites]
 
 
-# Event kinds in display order. ``motion`` is plain motion with no smart detection.
-EVENT_KINDS = ("doorbell", "person", "vehicle", "package", "animal", "motion")
-EVENT_KIND_DEFAULTS = {
-    "doorbell": True, "person": True, "vehicle": True,
-    "package": True, "animal": False, "motion": False,
+# Event kinds in display order: (label, group, shown by default).
+# ``motion`` is plain motion with no smart detection; "heard" kinds are Protect
+# audio detections.
+KINDS = {
+    "doorbell": ("Doorbell ring", "seen", True),
+    "person": ("Person", "seen", True),
+    "vehicle": ("Vehicle", "seen", True),
+    "package": ("Package", "seen", True),
+    "animal": ("Animal", "seen", False),
+    "motion": ("Motion only", "seen", False),
+    "smoke": ("Smoke alarm", "heard", False),
+    "co": ("CO alarm", "heard", False),
+    "baby": ("Baby crying", "heard", False),
+    "speaking": ("Speaking", "heard", False),
+}
+EVENT_KINDS = tuple(KINDS)
+EVENT_KIND_DEFAULTS = {k: v[2] for k, v in KINDS.items()}
+KIND_LABELS = {k: v[0] for k, v in KINDS.items()}
+# Shorter names for chips and event rows on the cameras page.
+KIND_SHORT = {**{k: v.split()[0] for k, v in KIND_LABELS.items()}, "baby": "Baby crying"}
+
+# Protect smart-detect types (objects and audio) -> our kinds.
+PROTECT_KINDS = {
+    "person": ("person",), "face": ("person",),
+    "vehicle": ("vehicle",), "licensePlate": ("vehicle",), "car": ("vehicle",),
+    "package": ("package",),
+    "animal": ("animal",), "pet": ("animal",),
+    "alrmSmoke": ("smoke",), "alrmCmonx": ("co",), "smoke_cmonx": ("smoke", "co"),
+    "alrmBabyCry": ("baby",), "alrmSpeak": ("speaking",),
 }
 
 
+def protect_kinds(types):
+    """Our kinds for Protect smart-detect types, in display order."""
+    found = {k for t in types or () for k in PROTECT_KINDS.get(t, ())}
+    return [k for k in EVENT_KINDS if k in found]
+
+
+SETTINGS_KEY = "settings"
+DETECTIONS_KEY = "detections"
+
+
+def _state():
+    from bdh_sdk.storage import app_state
+
+    return app_state("cameras")
+
+
+def settings():
+    """The main settings page's values (app state); missing keys use the old flat settings."""
+    raw = _state().get(SETTINGS_KEY)
+    return raw if isinstance(raw, dict) else {}
+
+
+def save_settings(**changes):
+    _state().set(SETTINGS_KEY, {**settings(), **changes})
+
+
 def enabled_event_kinds():
-    """Event kinds turned on in Settings (``show_<kind>``)."""
+    """Event kinds picked under "Show these events" (before that, the old ``show_<kind>``)."""
+    picked = settings().get("events")
+    if isinstance(picked, list):
+        return [k for k in EVENT_KINDS if k in picked]
     return [
         k for k in EVENT_KINDS
         if app_setting("cameras", f"show_{k}", EVENT_KIND_DEFAULTS[k], cast=as_bool)
@@ -110,16 +163,58 @@ def enabled_event_kinds():
 
 def keep_open():
     """Hold off the hub screensaver while the cameras page is open."""
+    value = settings().get("keep_open")
+    if isinstance(value, bool):
+        return value
     return app_setting("cameras", "keep_open", True, cast=as_bool)
+
+
+def video_transport():
+    value = settings().get("video_transport")
+    if value in ("tcp", "udp"):
+        return value
+    return "udp" if app_setting("cameras", "video_transport", "tcp") == "udp" else "tcp"
 
 
 def video_mode():
     """go2rtc player mode for live video: ``webrtc/tcp`` (default) or ``webrtc`` (UDP first)."""
-    return "webrtc" if app_setting("cameras", "video_transport", "tcp") == "udp" else "webrtc/tcp"
+    return "webrtc" if video_transport() == "udp" else "webrtc/tcp"
+
+
+POPUP_SECONDS_MIN, POPUP_SECONDS_MAX = 10, 600
 
 
 def popup_seconds():
+    """How long a pop-up stays up: the Pop-ups page's ``seconds``, else the old flat setting."""
+    raw = _state().get("popups")
+    value = raw.get("seconds") if isinstance(raw, dict) else None
+    if value is None:
+        value = app_setting("cameras", "popup_seconds", 60)
     try:
-        return max(10, int(app_setting("cameras", "popup_seconds", 60)))
+        return min(POPUP_SECONDS_MAX, max(POPUP_SECONDS_MIN, int(value)))
     except (TypeError, ValueError):
         return 60
+
+
+def known_detections():
+    """Last-known detections per NVR: ``{nvr_id: [{id, name, doorbell, enabled, supported}]}``.
+
+    Kept so the settings pages still work while an NVR is unreachable.
+    """
+    raw = _state().get(DETECTIONS_KEY)
+    return raw if isinstance(raw, dict) else {}
+
+
+def remember_detections(nvr_id, cameras):
+    """Store an NVR's cameras' detections (only when they changed)."""
+    rows = [
+        {"id": c["camera_id"], "name": c.get("name") or c["camera_id"],
+         "doorbell": bool(c.get("is_doorbell")),
+         "enabled": list(c["detections"].get("enabled", [])),
+         "supported": list(c["detections"].get("supported", []))}
+        for c in cameras if c.get("camera_id") and isinstance(c.get("detections"), dict)
+    ]
+    known = known_detections()
+    if known.get(nvr_id) == rows:
+        return
+    _state().set(DETECTIONS_KEY, {**known, nvr_id: rows})

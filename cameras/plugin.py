@@ -1,7 +1,5 @@
-from bdh_sdk import PluginSpec, Setting, SettingsPage, Tile
-from bdh_sdk.plugins import BOOL, CHOICE, INT, LIFECYCLE_ALWAYS, NETWORK_LAN
-
-_KIND_HELP = "Show these in the Last 24 hours panel and on the timeline (signed-in admins only)."
+from bdh_sdk import PluginSpec, SettingsPage, Tile
+from bdh_sdk.plugins import LIFECYCLE_ALWAYS, NETWORK_LAN
 
 spec = PluginSpec(
     id="cameras",
@@ -18,30 +16,13 @@ spec = PluginSpec(
             order=20,
         ),
     ),
-    settings=(
-        Setting("show_doorbell", "Doorbell rings", type=BOOL, default=True, help=_KIND_HELP),
-        Setting("show_person", "People", type=BOOL, default=True, help=_KIND_HELP),
-        Setting("show_vehicle", "Vehicles", type=BOOL, default=True, help=_KIND_HELP),
-        Setting("show_package", "Packages", type=BOOL, default=True, help=_KIND_HELP),
-        Setting("show_animal", "Animals", type=BOOL, default=False, help=_KIND_HELP),
-        Setting("show_motion", "Plain motion", type=BOOL, default=False,
-                help="Motion with no person, vehicle, package or animal detected."),
-        Setting("keep_open", "Leave cameras open when idle", type=BOOL, default=True,
-                help="Keep the cameras page on screen instead of switching to the screen saver."),
-        Setting("popup_seconds", "Pop-up duration", type=INT, default=60,
-                minimum=10, maximum=600, unit="s"),
-        Setting("video_transport", "Advanced: live video transport", type=CHOICE, default="tcp",
-                choices=(("tcp", "TCP"), ("udp", "UDP (TCP if UDP fails)")),
-                help="TCP recovers lost packets, so video doesn't freeze on a lossy network. "
-                     "UDP has lower latency but go2rtc doesn't resend lost packets."),
-    ),
+    # One page (NVRs, events, pop-ups, cameras page, advanced); it links to the
+    # NVRs and Pop-ups pages. The old flat settings (show_<kind>, keep_open,
+    # popup_seconds, video_transport) are still read until it's saved.
     settings_pages=(
-        SettingsPage("NVRs", "cameras_nvrs",
-                     subtitle="The UniFi Protect consoles the cameras come from",
-                     icon="fas fa-server"),
-        SettingsPage("Pop-ups", "cameras_popups",
-                     subtitle="Which detections and Home Assistant events pop up each camera",
-                     icon="fas fa-bell"),
+        SettingsPage("Cameras", "cameras_settings",
+                     subtitle="NVRs, events, pop-ups and video",
+                     icon="fas fa-video"),
     ),
     api_version=2,
     # Pop-ups: the trigger picker lists HA entities, any of them can trigger

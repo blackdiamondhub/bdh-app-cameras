@@ -1,0 +1,167 @@
+{% extends 'hub_settings/_layout.html' %}
+
+{% block title %}Cameras · Settings{% endblock %}
+
+{% block section %}
+<style>
+    .cs-sec { display: flex; align-items: center; gap: 8px; margin: 22px 4px 10px; color: var(--mut); font-size: 12.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+    .cs-sec:first-of-type { margin-top: 4px; }
+    .cs-sec .lock { text-transform: none; letter-spacing: 0; font-weight: 400; }
+    .cs-sec .sub { text-transform: none; letter-spacing: 0; font-weight: 400; }
+    .cs-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok, #7fd19a); margin-right: 6px; vertical-align: 1px; }
+    .cs-dot.bad { background: var(--red); }
+    .cs-off { opacity: .4; pointer-events: none; }
+    .cs-empty { border: 1px dashed var(--line); border-radius: 22px; padding: 26px; text-align: center; margin-bottom: 18px; }
+    .cs-empty b { font-size: 18px; font-weight: 500; }
+    .cs-empty p { color: var(--mut); margin: 6px 0 16px; font-size: 14.5px; }
+    .cs-ev { display: block; }
+    .cs-grp { margin: 14px 0 0; color: var(--mut); font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+    .cs-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .cs-chip { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: rgba(255,255,255,.04); color: var(--mut); border-radius: 999px; padding: 8px 15px; font-family: inherit; font-size: 14.5px; cursor: pointer; }
+    .cs-chip.on { border-color: var(--acc); background: rgba(91,164,230,.16); color: #eef3fa; }
+    .cs-chip i { font-style: normal; font-size: 12px; color: var(--mut); }
+    .cs-chip:focus-visible { outline: 2px solid var(--acc2); outline-offset: 2px; }
+    .cs-hint { color: var(--mut); font-size: 13px; margin-top: 12px; }
+    .cs-warn { color: var(--warn, #ffd166); }
+    #cs-status { min-width: 80px; text-align: right; color: var(--mut); font-size: 14px; }
+    #cs-status.bad { color: var(--red); }
+</style>
+
+{% csrf_token %}
+<div class="hst-head">
+    <div>
+        <h2>Cameras</h2>
+        <p>Where the cameras come from, which events show, and what pops up.</p>
+    </div>
+    <div class="act"><span id="cs-status" aria-live="polite"></span></div>
+</div>
+
+{% with p=page %}
+<div class="cs-sec">NVRs</div>
+{% if p.error %}
+<div class="hst-note bad">{{ p.error }}</div>
+{% elif p.nvrs %}
+<div class="hst-card">
+    {% for n in p.nvrs %}
+    <a class="hst-row hst-link" href="{{ p.nvrs_url }}">
+        <div class="lbl"><b>{{ n.name }}</b>
+            <small>{% if not n.has_api_key %}<span class="cs-dot bad"></span>{{ n.host }} · no API key{% elif n.ok %}<span class="cs-dot"></span>{{ n.host }} · {{ n.cameras }} camera{{ n.cameras|pluralize }}{% else %}<span class="cs-dot bad"></span>{{ n.host }} · can't reach it{% endif %}</small>
+        </div>
+        <span class="go">›</span>
+    </a>
+    {% endfor %}
+    <a class="hst-row hst-link" href="{{ p.nvrs_url }}"><div class="lbl" style="color:var(--acc2)">+ Add NVR</div></a>
+</div>
+{% else %}
+<div class="cs-empty">
+    <b>Connect a UniFi Protect NVR</b>
+    <p>Events, pop-ups and the cameras page all come from it.</p>
+    <a class="hst-btn" style="text-decoration:none" href="{{ p.nvrs_url }}">+ Add NVR</a>
+</div>
+{% endif %}
+
+<div{% if not p.nvrs %} class="cs-off" aria-disabled="true"{% endif %}>
+    <div class="cs-sec">Events <span class="sub">· Last 24 hours panel and timeline</span>{% if not p.nvrs %}<span class="lock">🔒 Needs an NVR</span>{% endif %}</div>
+    <div class="hst-card">
+        <div class="hst-row cs-ev">
+            <div class="lbl"><b>Show these events</b>
+                <small>{% if p.nvrs %}Detections that are on for at least one camera in Protect. The number is how many cameras have it.{% else %}Appears once an NVR is connected.{% endif %}</small>
+                {% if p.unreachable %}<small class="cs-warn">Can't reach {{ p.unreachable|join:", " }}, so its cameras are as last seen.</small>{% endif %}
+            </div>
+            <div id="cs-kinds"></div>
+            {% if p.nvrs %}<div class="cs-hint">Need something else? Turn on more detections per camera in Protect, and it shows up here.</div>{% endif %}
+        </div>
+    </div>
+
+    <div class="cs-sec">Pop-ups{% if not p.nvrs %}<span class="lock">🔒 Needs an NVR</span>{% endif %}</div>
+    <div class="hst-card">
+        <a class="hst-row hst-link" href="{{ p.popups_url }}">
+            <div class="lbl"><b>Camera pop-ups</b>
+                <small>{% if p.popups.enabled %}On · {{ p.popups.cameras }} camera{{ p.popups.cameras|pluralize }} · stays up {{ p.popups.seconds }} s{% else %}Off{% endif %}</small>
+            </div>
+            <span class="go">›</span>
+        </a>
+    </div>
+
+    <div class="cs-sec">Cameras page{% if not p.nvrs %}<span class="lock">🔒 Needs an NVR</span>{% endif %}</div>
+    <div class="hst-card">
+        <div class="hst-row">
+            <div class="lbl"><b>Keep it open</b><small>Keep the cameras page on screen instead of switching to the screen saver when idle.</small></div>
+            <div class="ctl"><label class="hst-tog"><input type="checkbox" id="cs-keep-open" aria-label="Keep it open"{% if p.keep_open %} checked{% endif %}><span></span></label></div>
+        </div>
+    </div>
+
+    <div class="cs-sec">Advanced{% if not p.nvrs %}<span class="lock">🔒 Needs an NVR</span>{% endif %}</div>
+    <div class="hst-card">
+        <div class="hst-row">
+            <div class="lbl"><b>Video transport</b><small>TCP recovers lost packets, so video doesn't freeze on a lossy network. UDP has lower latency but go2rtc doesn't resend lost packets.</small></div>
+            <div class="ctl">
+                <select class="hst-in" id="cs-transport" aria-label="Video transport">
+                    <option value="tcp"{% if p.video_transport == 'tcp' %} selected{% endif %}>TCP</option>
+                    <option value="udp"{% if p.video_transport == 'udp' %} selected{% endif %}>UDP (TCP if UDP fails)</option>
+                </select>
+            </div>
+        </div>
+    </div>
+</div>
+{% endwith %}
+
+{{ page|json_script:"cs-data" }}
+<script>
+(function () {
+    const page = JSON.parse(document.getElementById('cs-data').textContent);
+    const csrf = document.querySelector('[name=csrfmiddlewaretoken]').value;
+    const status = document.getElementById('cs-status');
+    const picked = new Set(page.events);
+    const GROUPS = [['seen', 'Seen'], ['heard', 'Heard']];
+    const el = (tag, props, ...kids) => {
+        const n = Object.assign(document.createElement(tag), props || {});
+        kids.forEach(k => k != null && n.append(k));
+        return n;
+    };
+
+    let pending = {}, timer = null, saving = Promise.resolve();
+    function save(changes) {
+        Object.assign(pending, changes);
+        clearTimeout(timer);
+        status.className = ''; status.textContent = 'Saving…';
+        timer = setTimeout(() => {
+            const body = JSON.stringify(pending);
+            pending = {};
+            saving = saving.then(() => fetch(page.save_url, {
+                method: 'POST', body, credentials: 'same-origin',
+                headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrf},
+            }).then(r => {
+                if (!r.ok) throw new Error(r.status);
+                status.textContent = 'Saved ✓';
+            }).catch(() => { status.className = 'bad'; status.textContent = 'Not saved'; }));
+        }, 400);
+    }
+
+    const box = document.getElementById('cs-kinds');
+    const shown = page.kinds.map(k => k.id);
+    GROUPS.forEach(([group, title]) => {
+        const kinds = page.kinds.filter(k => k.group === group);
+        if (!kinds.length) return;
+        const chips = el('div', {className: 'cs-chips', role: 'group', ariaLabel: title});
+        kinds.forEach(k => {
+            const chip = el('button', {type: 'button', className: 'cs-chip'}, k.label, ' ',
+                el('i', {textContent: k.cameras, title: k.cameras + (k.cameras === 1 ? ' camera' : ' cameras')}));
+            const sync = () => { const on = picked.has(k.id); chip.classList.toggle('on', on); chip.setAttribute('aria-pressed', on); };
+            chip.addEventListener('click', () => {
+                if (picked.has(k.id)) picked.delete(k.id); else picked.add(k.id);
+                sync();
+                save({events: shown.filter(id => picked.has(id)), shown});
+            });
+            sync(); chips.append(chip);
+        });
+        box.append(el('div', {className: 'cs-grp', textContent: title}), chips);
+    });
+
+    const keep = document.getElementById('cs-keep-open');
+    keep.addEventListener('change', () => save({keep_open: keep.checked}));
+    const transport = document.getElementById('cs-transport');
+    transport.addEventListener('change', () => save({video_transport: transport.value}));
+})();
+</script>
+{% endblock %}
