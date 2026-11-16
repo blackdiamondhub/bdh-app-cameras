@@ -1,6 +1,8 @@
 import json
 import logging
 import re
+import threading
+import time
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -59,33 +61,79 @@ def _register_streams_with_go2rtc(go2rtc_url, cameras):
 
     Registers streams that are missing from go2rtc, and re-registers ones
     whose source URL has changed (e.g. after the RTSPS token was rotated).
+    The streams are also remembered so the keeper can restore them if
+    go2rtc restarts (it has no config file, so a restart forgets them).
     """
-    # Fetch existing streams once
+    wanted = {}
+    for camera in cameras:
+        wanted[camera['stream_name']] = camera['rtsp_url']
+        low_url = camera.get('rtsp_url_low', '')
+        if low_url:
+            wanted[f"{camera['stream_name']}_low"] = low_url
+    with _keeper_lock:
+        _wanted.setdefault(go2rtc_url, {}).update(wanted)
+    _sync_streams(go2rtc_url, wanted)
+
+
+# go2rtc url -> {stream name: source url} registered by page loads.
+_wanted = {}
+_keeper_lock = threading.Lock()
+_keeper_started = False
+KEEPER_INTERVAL = 10
+
+
+def _sync_streams(go2rtc_url, wanted, require_listing=False):
+    """PUT every wanted stream that go2rtc is missing or has a stale source for.
+
+    Returns the number of streams registered, or None when go2rtc couldn't be
+    listed and ``require_listing`` is set.
+    """
     try:
         req = urllib.request.Request(f'{go2rtc_url}/api/streams')
         with urllib.request.urlopen(req, timeout=5) as response:
             existing = _stream_sources(json.loads(response.read()))
     except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        if require_listing:
+            return None
         existing = {}
 
-    # Collect streams that need registration
-    to_register = []
-    for camera in cameras:
-        candidates = [(camera['stream_name'], camera['rtsp_url'])]
-        low_url = camera.get('rtsp_url_low', '')
-        if low_url:
-            candidates.append((f"{camera['stream_name']}_low", low_url))
-        for name, url in candidates:
-            if name not in existing or url not in existing[name]:
-                to_register.append((name, url))
-
-    # Register all new streams in parallel
+    to_register = [
+        (name, url) for name, url in wanted.items()
+        if name not in existing or url not in existing[name]
+    ]
     if to_register:
         with ThreadPoolExecutor(max_workers=8) as pool:
-            pool.map(
-                lambda args: _put_stream(go2rtc_url, *args),
-                to_register,
-            )
+            list(pool.map(lambda args: _put_stream(go2rtc_url, *args), to_register))
+    return len(to_register)
+
+
+def keep_streams_once():
+    """Restore any remembered streams that go2rtc has lost (e.g. after a restart)."""
+    with _keeper_lock:
+        snapshot = {url: dict(streams) for url, streams in _wanted.items()}
+    for go2rtc_url, wanted in snapshot.items():
+        n = _sync_streams(go2rtc_url, wanted, require_listing=True)
+        if n:
+            logger.warning("go2rtc at %s was missing %d stream(s); re-registered", go2rtc_url, n)
+
+
+def start_stream_keeper():
+    """Start the background thread that keeps go2rtc's streams registered (idempotent)."""
+    global _keeper_started
+    with _keeper_lock:
+        if _keeper_started:
+            return
+        _keeper_started = True
+
+    def loop():
+        while True:
+            time.sleep(KEEPER_INTERVAL)
+            try:
+                keep_streams_once()
+            except Exception:
+                logger.exception("go2rtc stream keeper failed")
+
+    threading.Thread(target=loop, name="go2rtc-stream-keeper", daemon=True).start()
 
 
 def _stream_sources(data):
