@@ -875,7 +875,14 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         console.warn(`Stream ${src}: ${reason}; restart #${n}`);
         reportFallback(el, src, 'watchdog-' + reason);
         if (hi) {
-            stopCard(card);
+            // Drop back to low-res right away so fullscreen never sits empty
+            // through the backoff; only the high-res retry waits.
+            stopStream(el);
+            card.classList.remove('hi-live');
+            const low = card.querySelector('video-stream:not(.cam-hi)');
+            if (low && !low.dataset.active && document.fullscreenElement === card) {
+                startStream(low, lowSrc(low));
+            }
         } else {
             stopStream(el);
             card.dataset.state = 'reconnecting';
@@ -956,11 +963,12 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     }
 
     function stopStream(el) {
+        // A pending watchdog restart must not outlive the stop, active or not
+        clearTimeout(el._restartTID);
         if (!el.dataset.active) return;
         clearTimeout(el._fallbackTID);
         clearInterval(el._fallbackPoll);
         clearInterval(el._watchdog);
-        clearTimeout(el._restartTID);
         el._frameWait = false;
         el._frameCbs = [];
         safeDisconnect(el);
@@ -1229,6 +1237,9 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
             activePanel.querySelectorAll('.cam-card').forEach(card => {
                 if (card !== fsCard) stopCard(card);
             });
+            // A fresh open starts high-res without the last session's backoff
+            const fsHi = fsCard.querySelector('video-stream.cam-hi');
+            if (fsHi) fsHi._restarts = 0;
 
             // Start new connections after a tick.
             // go2rtc's VideoRTC.onclose() handler fires asynchronously when
