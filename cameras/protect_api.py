@@ -88,7 +88,7 @@ def get_protect_cameras():
         cache_key = f'{CACHE_KEY_PREFIX}{host}'
         cached = django_cache.get(cache_key)
         if cached is not None:
-            logger.info("Camera cache HIT for %s", host)
+            logger.debug("Camera cache HIT for %s", host)
             result_map[i] = {
                 'id': site.get('id'),
                 'name': site.get('name', host),
