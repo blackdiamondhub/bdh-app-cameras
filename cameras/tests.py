@@ -999,6 +999,9 @@ class StreamKeeperTests(TestCase):
         self.views = views
         views._wanted.clear()
         self.addCleanup(views._wanted.clear)
+        sites = patch("cameras.views.config.protect_sites", return_value=[])
+        self.protect_sites = sites.start()
+        self.addCleanup(sites.stop)
 
     def _listing(self, data):
         resp = MagicMock()
@@ -1082,6 +1085,38 @@ class StreamKeeperTests(TestCase):
                       [c.args for c in mock_put.call_args_list])
         self.assertNotIn((self.URL, 'hot_tub', 'rtsps://host:7441/tub'),
                          [c.args for c in mock_put.call_args_list])
+
+    @patch("cameras.views._put_stream")
+    @patch("cameras.views.urllib.request.urlopen")
+    def test_registers_protect_cameras_without_a_page_load(self, mock_urlopen, mock_put):
+        """After an app update nothing is remembered and the open wall display
+        never reloads; the keeper must still register every Protect camera."""
+        self.protect_sites.return_value = [{'host': 'nvr'}]
+        mock_urlopen.return_value = self._listing({})
+        with patch("cameras.views.get_protect_cameras",
+                   return_value=[{'cameras': self.CAMS}, {'cameras': [], 'ok': False}]), \
+             patch("cameras.views.config.go2rtc_url", return_value=self.URL), \
+             self.assertLogs('cameras.views', level='WARNING'):
+            self.views.keep_streams_once()
+
+        self.assertCountEqual(
+            [c.args for c in mock_put.call_args_list],
+            [(self.URL, 'front_door', 'rtsps://host:7441/abc'),
+             (self.URL, 'front_door_low', 'rtsps://host:7441/abc_low'),
+             (self.URL, 'hot_tub', 'rtsps://host:7441/tub')],
+        )
+
+    @patch("cameras.views._put_stream")
+    @patch("cameras.views.urllib.request.urlopen")
+    def test_protect_failure_still_restores_remembered_streams(self, mock_urlopen, mock_put):
+        mock_urlopen.return_value = self._listing(self._all_present())
+        _register_streams_with_go2rtc(self.URL, self.CAMS)
+        self.protect_sites.return_value = [{'host': 'nvr'}]
+        mock_urlopen.return_value = self._listing({})
+        with patch("cameras.views.get_protect_cameras", side_effect=RuntimeError("nvr down")), \
+             self.assertLogs('cameras.views', level='WARNING'):
+            self.views.keep_streams_once()
+        self.assertEqual(mock_put.call_count, 3)
 
     def test_keeper_starts_once(self):
         self.views._keeper_started = False

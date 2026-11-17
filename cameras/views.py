@@ -65,6 +65,12 @@ def _register_streams_with_go2rtc(go2rtc_url, cameras):
     The streams are also remembered so the keeper can restore them if
     go2rtc restarts (it has no config file, so a restart forgets them).
     """
+    wanted = _remember_streams(go2rtc_url, cameras)
+    _sync_streams(go2rtc_url, wanted)
+
+
+def _remember_streams(go2rtc_url, cameras):
+    """Add the cameras' high/low streams to the keeper's set; returns them."""
     wanted = {}
     for camera in cameras:
         wanted[camera['stream_name']] = camera['rtsp_url']
@@ -73,7 +79,21 @@ def _register_streams_with_go2rtc(go2rtc_url, cameras):
             wanted[f"{camera['stream_name']}_low"] = low_url
     with _keeper_lock:
         _wanted.setdefault(go2rtc_url, {}).update(wanted)
-    _sync_streams(go2rtc_url, wanted)
+    return wanted
+
+
+def _seed_from_protect():
+    """Remember every Protect camera's streams without waiting for a page load.
+
+    After an app update the process (and go2rtc) restart with nothing
+    registered, while an already-open wall display never reloads the page,
+    so page loads alone would leave go2rtc empty indefinitely.
+    """
+    if not config.protect_sites():
+        return
+    cameras = [cam for site in get_protect_cameras() for cam in site.get('cameras', [])]
+    if cameras:
+        _remember_streams(config.go2rtc_url(), cameras)
 
 
 # go2rtc url -> {stream name: source url} registered by page loads.
@@ -110,6 +130,10 @@ def _sync_streams(go2rtc_url, wanted, require_listing=False):
 
 def keep_streams_once():
     """Restore any remembered streams that go2rtc has lost (e.g. after a restart)."""
+    try:
+        _seed_from_protect()
+    except Exception:
+        logger.exception("Couldn't list Protect cameras for the stream keeper")
     with _keeper_lock:
         snapshot = {url: dict(streams) for url, streams in _wanted.items()}
     for go2rtc_url, wanted in snapshot.items():
