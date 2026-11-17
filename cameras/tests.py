@@ -2760,9 +2760,10 @@ class EventTemplateTests(TestCase):
         self.assertIn('<img class="cam-poster" alt="" src="data:image/jpeg;base64,anBn">', html)
         self.assertIn('src="/cameras/snapshot/cam1/?w=640"', old)
 
+    @patch("cameras.views._cached_poster", return_value=None)
     @patch("cameras.views._register_streams_with_go2rtc")
     @patch("cameras.views.get_protect_cameras")
-    def test_popup_is_public_and_live_only(self, mock_cameras, mock_register):
+    def test_popup_is_public_and_live_only(self, mock_cameras, mock_register, _poster):
         mock_cameras.return_value = self.CAMS
         resp = Client().get("/cameras/popup/cam1/")
         self.assertEqual(resp.status_code, 200)
@@ -2772,8 +2773,35 @@ class EventTemplateTests(TestCase):
         self.assertContains(resp, 'data-mode="webrtc/tcp"')
         self.assertContains(resp, 'data-fallback-mode="mse"')
         self.assertNotContains(resp, "cam-scrub")
+        self.assertNotContains(resp, 'class="poster"')
         mock_register.assert_called_once()
         self.assertEqual(Client().get("/cameras/popup/nope/").status_code, 404)
+
+    @patch("cameras.views._register_streams_with_go2rtc")
+    @patch("cameras.views.get_protect_cameras")
+    def test_popup_poster_is_cached_still_or_warms_cache(self, mock_cameras, _):
+        import time
+        from cameras import frames
+        mock_cameras.return_value = self.CAMS
+        cached = {("cam1", 640): [time.monotonic(), b"jpg", 0]}
+        with patch.dict(frames._live, cached, clear=True):
+            html = Client().get("/cameras/popup/cam1/").content.decode()
+        self.assertIn('<img class="poster" alt="" src="data:image/jpeg;base64,anBn">', html)
+        # Cold cache: no poster (never a blocking Protect fetch or the
+        # admin-only snapshot URL), but the still is fetched for next time.
+        with patch.dict(frames._live, {}, clear=True), \
+                patch("cameras.views._fetch_live", return_value=b"new") as fetch, \
+                patch("cameras.frames._ensure_warmer"):
+            html = Client().get("/cameras/popup/cam1/").content.decode()
+            for _ in range(50):
+                if ("cam1", 640) in frames._live:
+                    break
+                time.sleep(0.02)
+            warmed = frames._live.get(("cam1", 640))
+        self.assertNotIn('class="poster"', html)
+        self.assertNotIn("/snapshot/", html)
+        fetch.assert_called_once_with(("cam1", 640))
+        self.assertEqual(warmed[1], b"new")
 
 
 from . import popups as popups_mod  # noqa: E402

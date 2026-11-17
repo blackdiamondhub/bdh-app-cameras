@@ -211,6 +211,25 @@ def _inline_posters(streams):
                 stream['poster'] = 'data:image/jpeg;base64,' + base64.b64encode(data).decode()
 
 
+def _cached_poster(camera_id):
+    """The cached live still as a data URI, else None (and warm it for next time).
+
+    Never fetches inline: a doorbell pop-up mustn't wait on Protect.
+    """
+    key = (camera_id, POSTER_W)
+    data = frames.live_peek(key)
+    if data:
+        return 'data:image/jpeg;base64,' + base64.b64encode(data).decode()
+
+    def warm():
+        try:
+            frames.live_get(key, _fetch_live)
+        except Exception as err:
+            logger.debug("Poster warm failed for %s: %s", camera_id, err)
+    threading.Thread(target=warm, daemon=True).start()
+    return None
+
+
 def camera_feed_view(request):
     """Display camera feeds via go2rtc, with tabs for multiple sites.
 
@@ -454,6 +473,8 @@ def popup(request, camera_id):
     return render(request, 'cameras/popup.html', {
         'stream': camera['stream_name'],
         'name': camera['name'],
+        # Inline only: the snapshot view is admin-only and the pop-up is public.
+        'poster': _cached_poster(camera_id),
         'go2rtc_port': urlparse(config.go2rtc_url()).port or 1984,
         'video_mode': config.video_mode(),
     })

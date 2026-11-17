@@ -10,7 +10,12 @@ repainting animations stall WebRTC video decode. See README "Display performance
 {% endcomment %}
 <style>
     html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: system-ui, sans-serif; }
-    video-stream, video { display: block; width: 100%; height: 100%; object-fit: contain; background: #000; }
+    video-stream, video { display: block; width: 100%; height: 100%; object-fit: contain; background: transparent; }
+    /* Recent still under the video, which stays invisible until it has
+       presented real frames (see waitFrame), so the pop-up never shows black. */
+    .poster { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+    video-stream { position: relative; }
+    video-stream:not(.has-frame) video { opacity: 0; }
     video::-webkit-media-controls { display: none !important; }
     /* go2rtc's built-in mode badge ("RTC" / "MSE") */
     video-stream .info { display: none !important; }
@@ -23,6 +28,7 @@ repainting animations stall WebRTC video decode. See README "Display performance
 </style>
 </head>
 <body data-state="connecting">
+{% if poster %}<img class="poster" alt="" src="{{ poster }}">{% endif %}
 <video-stream data-stream-name="{{ stream }}" data-mode="{{ video_mode }}" data-fallback-mode="mse"></video-stream>
 <div class="state">LIVE</div>
 <script type="module">
@@ -52,9 +58,29 @@ repainting animations stall WebRTC video decode. See README "Display performance
 
     function replace(el, mode) {
         const next = el.cloneNode(false);
+        next.classList.remove('has-frame');
         el.replaceWith(next);
         teardown(el);
         start(next, mode);
+    }
+
+    // Mark .has-frame once the video has presented real frames.  A WebRTC
+    // track's first presented frame can be blank, so wait for the second.
+    function waitFrame(el) {
+        const v = el.video;
+        if (!v || el._frameWait || el.classList.contains('has-frame')) return;
+        if (!v.requestVideoFrameCallback) {
+            if (v.videoWidth) el.classList.add('has-frame');
+            return;
+        }
+        el._frameWait = true;
+        let seen = 0;
+        const check = () => {
+            if (!el._frameWait) return;
+            if (++seen >= 2 && v.videoWidth) { el._frameWait = false; el.classList.add('has-frame'); }
+            else v.requestVideoFrameCallback(check);
+        };
+        v.requestVideoFrameCallback(check);
     }
 
     // WebRTC only (running MSE alongside swaps the source mid-start and
@@ -72,7 +98,9 @@ repainting animations stall WebRTC video decode. See README "Display performance
             v.muted = true;
             v.controls = false;
             v.playsInline = true;
-            v.addEventListener('playing', () => { live = true; restarts = 0; document.body.dataset.state = 'live'; });
+            v.addEventListener('playing', () => { live = true; restarts = 0; document.body.dataset.state = 'live'; waitFrame(el); });
+            v.addEventListener('timeupdate', () => { if (!v.paused) waitFrame(el); });
+            v.addEventListener('emptied', () => { el._frameWait = false; el.classList.remove('has-frame'); });
             v.addEventListener('waiting', () => { document.body.dataset.state = 'connecting'; });
         }
         el._dog = setInterval(() => {
