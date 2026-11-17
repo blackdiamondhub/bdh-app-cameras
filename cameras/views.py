@@ -535,13 +535,8 @@ def ptz_goto(request):
 RTC_DIAG_MAX_BYTES = 16 * 1024
 
 
-@require_POST
-def rtc_diag(request):
-    """Log a browser's WebRTC stats when a tile gives up and falls back to MSE.
-
-    The fallback is otherwise silent server-side; these stats (frames
-    received vs decoded, decoder, ICE state) show *why* WebRTC didn't play.
-    """
+def _log_diag(request, label):
+    """Log a browser diagnostics JSON object as one line under ``label``."""
     if len(request.body) > RTC_DIAG_MAX_BYTES:
         return JsonResponse({'error': 'too large'}, status=413)
     try:
@@ -551,11 +546,32 @@ def rtc_diag(request):
     if not isinstance(data, dict):
         return JsonResponse({'error': 'bad json'}, status=400)
     logger.warning(
-        "WebRTC fallback from %s: %s",
+        "%s from %s: %s",
+        label,
         request.META.get('REMOTE_ADDR'),
         json.dumps(data, separators=(',', ':'), sort_keys=True),
     )
     return HttpResponse(status=204)
+
+
+@require_POST
+def rtc_diag(request):
+    """Log a browser's WebRTC stats when a tile gives up and falls back to MSE.
+
+    The fallback is otherwise silent server-side; these stats (frames
+    received vs decoded, decoder, ICE state) show *why* WebRTC didn't play.
+    """
+    return _log_diag(request, "WebRTC fallback")
+
+
+@require_POST
+def rtc_events(request):
+    """Log a browser's batched stream events (frame gaps, resolution changes).
+
+    Sent every couple of seconds, so the last events before a display crash
+    reach the log even though the page dies.
+    """
+    return _log_diag(request, "Stream events")
 
 
 # ---- Pop-ups settings page ---------------------------------------------------
