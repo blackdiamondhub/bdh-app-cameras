@@ -1038,9 +1038,26 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     })();
     window.__camMaxStreams = maxStreams;
 
+    // Test-only camera selection, to find a stream the display can't survive.
+    // ?only=name1,name2 (stream names, e.g. mercer_island_backyard) plays just
+    // those grid tiles, stored like the cap; ?only=all clears it.
+    const ONLY_STREAMS_KEY = 'cameras.onlyStreams';
+    const onlyStreams = (() => {
+        try {
+            const q = new URLSearchParams(location.search).get('only');
+            if (q === 'all') localStorage.removeItem(ONLY_STREAMS_KEY);
+            else if (q) localStorage.setItem(ONLY_STREAMS_KEY, q);
+            const v = localStorage.getItem(ONLY_STREAMS_KEY);
+            return v ? v.split(',').map(s => s.trim()).filter(Boolean) : null;
+        } catch (e) { return null; }
+    })();
+    window.__camOnlyStreams = onlyStreams;
+
     // Initialize video-stream elements for a panel (low quality for grid)
     function initStreams(panel) {
-        panel.querySelectorAll('video-stream:not(.cam-hi)').forEach((el, i) => {
+        let tiles = [...panel.querySelectorAll('video-stream:not(.cam-hi)')];
+        if (onlyStreams) tiles = tiles.filter(el => onlyStreams.includes(el.dataset.streamName));
+        tiles.forEach((el, i) => {
             if (maxStreams !== null && i >= maxStreams) return;
             if (!el.dataset.active) startStream(el, lowSrc(el));
         });
@@ -2270,6 +2287,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
                 heap_total_mb: m ? Math.round(m.totalJSHeapSize / 1048576) : null,
                 videos: document.querySelectorAll('video').length, streams,
                 max_streams: window.__camMaxStreams ?? null,
+                only_streams: window.__camOnlyStreams ?? null,
                 events: (window.__camEvents || []).slice(-30),
             }});
         };
