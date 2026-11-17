@@ -2,7 +2,7 @@ import json
 import unittest
 import urllib.request
 import urllib.parse
-from django.test import TestCase, Client, override_settings, tag
+from django.test import SimpleTestCase, TestCase, Client, override_settings, tag
 from django.contrib.staticfiles.testing import StaticLiveServerTestCase
 from django.contrib.auth.models import User
 from unittest.mock import patch, MagicMock, call
@@ -3466,3 +3466,22 @@ class BrokerTests(TestCase):
         pushed = self.broker.ops("alerts.push")
         self.assertEqual([(a["app"], a["key"], a["embed_url"]) for a in pushed],
                          [("cameras", "doorbell:cam1", "/cameras/popup/cam1/")])
+
+
+class HubFrameLayoutTests(SimpleTestCase):
+    """The app renders inside the hub's iframe, already below the hub navbar, so its
+    CSS must not reserve space for that navbar (top:62px / 100vh-62px / phone 118px)
+    nor scope rules under the hub's `.navbar`, which doesn't exist in the iframe."""
+
+    def test_no_hub_navbar_offsets(self):
+        import pathlib
+        import re
+        root = pathlib.Path(__file__).resolve().parent
+        self.assertTrue((root / "templates").is_dir())
+        pattern = re.compile(r"top\s*:\s*(6[0-9]|118)px|100vh\s*-\s*(6[0-9]|118)px|\.navbar(?![-\w])")
+        hits = []
+        for path in list(root.glob("templates/**/*.html")) + list(root.glob("static/**/*.css")):
+            for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if pattern.search(line):
+                    hits.append(f"{path.relative_to(root)}:{n}: {line.strip()}")
+        self.assertEqual(hits, [])
