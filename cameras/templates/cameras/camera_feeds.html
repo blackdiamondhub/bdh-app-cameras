@@ -53,7 +53,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     }
     .site-tab.active i { color: #7cc4ff; }
     @media (min-width: 1201px) {
-        .sitebar ~ .camera-grid { height: calc(100vh - 62px - 54px); }
+        .sitebar ~ .camera-grid { height: calc(100vh - 54px); }
     }
 
     .site-panel { display: none; }
@@ -65,7 +65,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         grid-auto-rows: minmax(0, 1fr);
         gap: 12px;
         padding: 14px;
-        height: calc(100vh - 62px);
+        height: 100vh;
         box-sizing: border-box;
         max-width: 1920px;
         margin: 0 auto;
@@ -223,7 +223,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         pointer-events: none;
     }
     body.show-stats .cam-stats { display: block; }
-    .cam-card:fullscreen .cam-stats { top: 64px; left: 24px; font-size: 14px; padding: 8px 12px; }
+    .cam-card:fullscreen .cam-stats { top: 4rem; left: 24px; font-size: 14px; padding: 8px 12px; }
 
     /* PTZ presets: always visible on the hero and in fullscreen (touch kiosk) */
     .ptz-controls {
@@ -367,7 +367,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         body.has-rail .camera-grid, body.has-rail .sitebar { margin-right: var(--rail-w); margin-left: 0; max-width: none; }
     }
     .ev-rail {
-        position: fixed; top: 62px; right: 0; bottom: 0; width: var(--rail-w); box-sizing: border-box;
+        position: fixed; top: 0; right: 0; bottom: 0; width: var(--rail-w); box-sizing: border-box;
         display: flex; flex-direction: column; padding: 14px 14px 14px 0; gap: 10px; z-index: 5;
     }
     .ev-rail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 4px; }
