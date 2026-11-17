@@ -1473,6 +1473,15 @@ class RtcDiagViewTests(TestCase):
             response = self.client.post('/cameras/diag/rtc/', data=body, content_type='application/json')
             self.assertEqual(response.status_code, 400)
 
+    def test_logs_stream_events(self):
+        body = {'maxStreams': 2, 'events': [{'k': 'gap', 's': 'driveway_low', 'ms': 900, 'pf': 1}]}
+        with self.assertLogs('cameras.views', 'WARNING') as logs:
+            response = self.client.post('/cameras/diag/events/', data=json.dumps(body),
+                                        content_type='application/json')
+        self.assertEqual(response.status_code, 204)
+        self.assertIn('Stream events', logs.output[0])
+        self.assertIn('"ms":900', logs.output[0])
+
 # --- PTZ template tests ---
 
 @override_settings(

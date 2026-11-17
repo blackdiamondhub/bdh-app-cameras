@@ -815,6 +815,71 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         v.requestVideoFrameCallback(check);
     }
 
+    // Diagnostics (display crash hunt): timestamped per-stream frame gaps and
+    // resolution changes, plus main-thread gaps ('*raf'), POSTed to the
+    // cameras server every 2 s so they survive a renderer crash.
+    // pf = frames presented during a gap (> 1: frames kept coming but the
+    // page didn't run); mt = media (RTP) time covered by the gap.
+    const RTC_EVENTS_URL = '{% url "camera_rtc_events" %}';
+    const FREEZE_MS = 300;
+    const pendingEvents = [];
+    const recentEvents = window.__camEvents = [];
+    let quietAll = 0;
+    function streamEvent(ev) {
+        ev.t = Date.now();
+        pendingEvents.push(ev);
+        if (pendingEvents.length > 300) pendingEvents.shift();
+        recentEvents.push(ev);
+        if (recentEvents.length > 50) recentEvents.shift();
+    }
+    function flushEvents() {
+        if (!pendingEvents.length) return;
+        const events = pendingEvents.splice(0);
+        fetch(RTC_EVENTS_URL, {
+            method: 'POST', keepalive: true,
+            body: JSON.stringify({ pageAgeS: Math.round((Date.now() - pageT0) / 1000),
+                                   maxStreams: window.__camMaxStreams, events }),
+            headers: {'Content-Type': 'application/json', 'X-CSRFToken': '{{ csrf_token }}'},
+        }).catch(() => {});
+    }
+    setInterval(flushEvents, 2000);
+    window.addEventListener('pagehide', flushEvents);
+    document.addEventListener('visibilitychange', () => { quietAll = performance.now(); });
+
+    function watchFrames(el) {
+        const v = el.video;
+        if (!v || !v.requestVideoFrameCallback || v._framesWatched) return;
+        v._framesWatched = true;
+        v.addEventListener('emptied', () => { el._quietAt = performance.now(); });
+        let last = 0, pf = 0, rtp = null, w = 0, h = 0;
+        const tick = (now, meta) => {
+            v.requestVideoFrameCallback(tick);
+            const name = (el.dataset.streamName || '?') + (el.classList.contains('cam-hi') ? ':hi' : '');
+            const quiet = Math.max(el._quietAt || 0, quietAll);
+            if (last && quiet < last && el.dataset.active && !document.hidden && now - last > FREEZE_MS) {
+                const ev = { k: 'gap', s: name, ms: Math.round(now - last), pf: meta.presentedFrames - pf };
+                if (meta.rtpTimestamp != null && rtp != null) ev.mt = Math.round(((meta.rtpTimestamp - rtp) >>> 0) / 90);
+                streamEvent(ev);
+            }
+            if (meta.width !== w || meta.height !== h) {
+                if (w) streamEvent({ k: 'res', s: name, from: `${w}x${h}`, to: `${meta.width}x${meta.height}` });
+                w = meta.width; h = meta.height;
+            }
+            last = now; pf = meta.presentedFrames; rtp = meta.rtpTimestamp ?? null;
+        };
+        v.requestVideoFrameCallback(tick);
+    }
+
+    let rafLast = 0;
+    const rafTick = now => {
+        if (rafLast && quietAll < rafLast && !document.hidden && now - rafLast > FREEZE_MS) {
+            streamEvent({ k: 'gap', s: '*raf', ms: Math.round(now - rafLast) });
+        }
+        rafLast = now;
+        requestAnimationFrame(rafTick);
+    };
+    requestAnimationFrame(rafTick);
+
     // Per-tile watchdog.  go2rtc's player doesn't recover from everything (a
     // peer connection the server closes, e.g. on a go2rtc restart, leaves it
     // stuck), so restart any stream that never starts, whose peer connection
@@ -847,6 +912,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
             if (document.hidden || (v && v.paused && card.dataset.state === 'live')
                     || card.classList.contains('replaying') || card.classList.contains('scrubbing')) {
                 since = lastMove = now;
+                el._quietAt = performance.now();
                 return;
             }
             // The WebRTC -> fallback switch owns the first seconds
@@ -912,6 +978,8 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         el.mode = el.dataset.mode;
         if (el.video) el.video.muted = true;
         watchState(el);
+        el._quietAt = performance.now();
+        watchFrames(el);
         el.src = url;
         el._streamUrl = url;
         el.dataset.active = 'true';
@@ -955,9 +1023,25 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
 
     const lowSrc = el => el.dataset.hasLow === 'true' ? `${el.dataset.streamName}_low` : el.dataset.streamName;
 
+    // Test-only cap on how many grid streams play, to find a stream count
+    // the display survives.  ?streams=N stores it for this browser (it must
+    // outlast the crash relaunches); ?streams=all clears it.
+    const MAX_STREAMS_KEY = 'cameras.maxStreams';
+    const maxStreams = (() => {
+        try {
+            const q = new URLSearchParams(location.search).get('streams');
+            if (q === 'all') localStorage.removeItem(MAX_STREAMS_KEY);
+            else if (/^\d+$/.test(q || '')) localStorage.setItem(MAX_STREAMS_KEY, q);
+            const n = parseInt(localStorage.getItem(MAX_STREAMS_KEY), 10);
+            return n >= 0 ? n : null;
+        } catch (e) { return null; }
+    })();
+    window.__camMaxStreams = maxStreams;
+
     // Initialize video-stream elements for a panel (low quality for grid)
     function initStreams(panel) {
-        panel.querySelectorAll('video-stream:not(.cam-hi)').forEach(el => {
+        panel.querySelectorAll('video-stream:not(.cam-hi)').forEach((el, i) => {
+            if (maxStreams !== null && i >= maxStreams) return;
             if (!el.dataset.active) startStream(el, lowSrc(el));
         });
     }
@@ -2155,11 +2239,17 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
             const streams = [];
             for (const el of document.querySelectorAll('video-stream')) {
                 if (!el.pc || !el.dataset.active) continue;
-                let rtp;
+                let rtp, pair;
+                const byId = new Map();
                 try {
-                    (await el.pc.getStats()).forEach(s => { if (s.type === 'inbound-rtp' && s.kind === 'video') rtp = s; });
+                    (await el.pc.getStats()).forEach(s => {
+                        byId.set(s.id, s);
+                        if (s.type === 'inbound-rtp' && s.kind === 'video') rtp = s;
+                        if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded') pair = s;
+                    });
                 } catch (e) { continue; }
                 if (!rtp) continue;
+                const local = pair && byId.get(pair.localCandidateId);
                 streams.push({
                     name: el.dataset.streamName || null, hi: el.classList.contains('cam-hi'),
                     dec: rtp.decoderImplementation || null, hw: rtp.powerEfficientDecoder ?? null,
@@ -2168,12 +2258,19 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
                     decode_s: rtp.totalDecodeTime != null ? Math.round(rtp.totalDecodeTime) : null,
                     freezes: rtp.freezeCount, freeze_s: rtp.totalFreezesDuration != null ? Math.round(rtp.totalFreezesDuration) : null,
                     jitter_ms: rtp.jitter != null ? Math.round(rtp.jitter * 1000) : null,
+                    received: rtp.framesReceived, keyframes: rtp.keyFramesDecoded,
+                    lost: rtp.packetsLost, nack: rtp.nackCount, pli: rtp.pliCount,
+                    jb_ms: rtp.jitterBufferEmittedCount
+                        ? Math.round(rtp.jitterBufferDelay / rtp.jitterBufferEmittedCount * 1000) : null,
+                    transport: local ? `${local.protocol}/${local.candidateType}` : null,
                 });
             }
             window.bdh.send('telemetry', {data: {
                 heap_mb: m ? Math.round(m.usedJSHeapSize / 1048576) : null,
                 heap_total_mb: m ? Math.round(m.totalJSHeapSize / 1048576) : null,
                 videos: document.querySelectorAll('video').length, streams,
+                max_streams: window.__camMaxStreams ?? null,
+                events: (window.__camEvents || []).slice(-30),
             }});
         };
         setTimeout(() => send().catch(() => {}), 5000);
