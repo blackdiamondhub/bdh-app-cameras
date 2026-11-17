@@ -1480,6 +1480,54 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         return events.filter(ev => cams.has(ev.camera_id));
     }
 
+    // Rail rows are kept across refreshes and only added/removed/moved as events
+    // change: rebuilding hundreds of rows (and their thumbnails) every poll was a
+    // ~350 ms main-thread task on the wall displays.
+    const railItems = new Map();  // event id -> {btn, ev, key}
+    const railDays = new Map();   // day label -> header element
+    let railSig = null;
+
+    function railItem(ev) {
+        const k = primaryKind(ev);
+        const label = ev.kinds.filter(x => KIND_LABEL[x]).map(x => KIND_LABEL[x]).join(' · ') || KIND_LABEL[k];
+        const key = `${label}|${k}|${ev.camera_name || ''}|${ev.start}`;
+        let item = railItems.get(ev.id);
+        if (!item) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'ev-item';
+            btn.dataset.id = ev.id;
+            btn.innerHTML = `<div class="ev-thumb"><img loading="lazy" alt=""></div>
+                <div class="ev-meta"><span class="ev-kind"></span><span class="ev-cam"></span><span class="ev-time"></span></div>`;
+            const img = btn.querySelector('img');
+            img.src = THUMB_URL(ev.id);
+            img.onerror = () => img.remove();
+            item = {btn, ev, key: null};
+            btn.addEventListener('click', () => openEvent(item.ev));
+            railItems.set(ev.id, item);
+        }
+        item.ev = ev;
+        if (item.key !== key) {
+            item.key = key;
+            item.btn.style.setProperty('--c', kindColor(k));
+            item.btn.querySelector('.ev-kind').textContent = label;
+            item.btn.querySelector('.ev-cam').textContent = ev.camera_name || '';
+            item.btn.querySelector('.ev-time').textContent = fmtTime(ev.start);
+        }
+        return item.btn;
+    }
+
+    function railDay(day) {
+        let h = railDays.get(day);
+        if (!h) {
+            h = document.createElement('div');
+            h.className = 'ev-day';
+            h.textContent = day;
+            railDays.set(day, h);
+        }
+        return h;
+    }
+
     function renderRail() {
         const site = siteEvents();
         const shown = site.filter(ev => !filter || ev.kinds.includes(filter));
@@ -1489,35 +1537,29 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
             updateHint();
             return;
         }
-        const frag = document.createDocumentFragment();
+        const want = [];
+        const days = new Set();
         let lastDay = null;
         for (const ev of shown) {
             const day = dayLabel(ev.start);
             if (day !== lastDay) {
-                const h = document.createElement('div');
-                h.className = 'ev-day';
-                h.textContent = day;
-                frag.appendChild(h);
+                want.push(railDay(day));
+                days.add(day);
                 lastDay = day;
             }
-            const k = primaryKind(ev);
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'ev-item';
-            btn.style.setProperty('--c', kindColor(k));
-            btn.dataset.id = ev.id;
-            btn.innerHTML = `<div class="ev-thumb"><img loading="lazy" alt=""></div>
-                <div class="ev-meta"><span class="ev-kind"></span><span class="ev-cam"></span><span class="ev-time"></span></div>`;
-            const img = btn.querySelector('img');
-            img.src = THUMB_URL(ev.id);
-            img.onerror = () => img.remove();
-            btn.querySelector('.ev-kind').textContent = ev.kinds.filter(x => KIND_LABEL[x]).map(x => KIND_LABEL[x]).join(' · ') || KIND_LABEL[k];
-            btn.querySelector('.ev-cam').textContent = ev.camera_name || '';
-            btn.querySelector('.ev-time').textContent = fmtTime(ev.start);
-            btn.addEventListener('click', () => openEvent(ev));
-            frag.appendChild(btn);
+            want.push(railItem(ev));
         }
-        list.replaceChildren(frag);
+        const live = new Set(events.map(ev => ev.id));
+        for (const id of railItems.keys()) if (!live.has(id)) railItems.delete(id);
+        for (const day of railDays.keys()) if (!days.has(day)) railDays.delete(day);
+        // Reconcile in place: new events usually only arrive at the top and
+        // expired ones fall off the bottom, so existing rows are left untouched.
+        let cur = list.firstChild;
+        for (const node of want) {
+            if (cur === node) { cur = cur.nextSibling; continue; }
+            list.insertBefore(node, cur);
+        }
+        while (cur) { const next = cur.nextSibling; cur.remove(); cur = next; }
         updateHint();
     }
 
@@ -1538,7 +1580,10 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         try {
             const r = await fetch(EVENTS_URL, {credentials: 'same-origin'});
             if (!r.ok) throw new Error(r.status);
-            const data = await r.json();
+            const text = await r.text();
+            if (text === railSig) return;
+            const data = JSON.parse(text);
+            railSig = text;
             events = data.events || [];
             renderRail();
             scrubbers.forEach(s => s.renderMarks());
