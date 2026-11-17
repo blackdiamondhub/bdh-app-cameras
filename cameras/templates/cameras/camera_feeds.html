@@ -2145,6 +2145,40 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
             };
         });
     });
+
+    // Page health for the hub's display telemetry (BlackDiamondHub #350): this frame's
+    // JS heap and per-stream WebRTC decoder numbers, every 30 s.
+    window.addEventListener('DOMContentLoaded', () => {
+        if (!window.bdh || !window.bdh.send) return;
+        const send = async () => {
+            const m = performance.memory;
+            const streams = [];
+            for (const el of document.querySelectorAll('video-stream')) {
+                if (!el.pc || !el.dataset.active) continue;
+                let rtp;
+                try {
+                    (await el.pc.getStats()).forEach(s => { if (s.type === 'inbound-rtp' && s.kind === 'video') rtp = s; });
+                } catch (e) { continue; }
+                if (!rtp) continue;
+                streams.push({
+                    name: el.dataset.streamName || null, hi: el.classList.contains('cam-hi'),
+                    dec: rtp.decoderImplementation || null, hw: rtp.powerEfficientDecoder ?? null,
+                    w: rtp.frameWidth || null, h: rtp.frameHeight || null, fps: rtp.framesPerSecond || null,
+                    decoded: rtp.framesDecoded, dropped: rtp.framesDropped,
+                    decode_s: rtp.totalDecodeTime != null ? Math.round(rtp.totalDecodeTime) : null,
+                    freezes: rtp.freezeCount, freeze_s: rtp.totalFreezesDuration != null ? Math.round(rtp.totalFreezesDuration) : null,
+                    jitter_ms: rtp.jitter != null ? Math.round(rtp.jitter * 1000) : null,
+                });
+            }
+            window.bdh.send('telemetry', {data: {
+                heap_mb: m ? Math.round(m.usedJSHeapSize / 1048576) : null,
+                heap_total_mb: m ? Math.round(m.totalJSHeapSize / 1048576) : null,
+                videos: document.querySelectorAll('video').length, streams,
+            }});
+        };
+        setTimeout(() => send().catch(() => {}), 5000);
+        setInterval(() => send().catch(() => {}), 30000);
+    });
 </script>
 {% if keep_open %}
 <script>
