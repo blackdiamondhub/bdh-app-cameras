@@ -260,6 +260,20 @@ def _cached_poster(camera_id):
     return None
 
 
+def _requested_site(value, sites):
+    """Index of the tab to open for ?site=, by name ("mercer_island") or index.
+
+    Unknown or hidden sites (guests only see the first) open the first tab.
+    """
+    value = (value or '').strip().lower().replace(' ', '_').replace('-', '_')
+    if value.isdigit():
+        return int(value) if int(value) < len(sites) else 0
+    for i, site in enumerate(sites):
+        if site['name'].lower().replace(' ', '_').replace('-', '_') == value:
+            return i
+    return 0
+
+
 def camera_feed_view(request):
     """Display camera feeds via go2rtc, with tabs for multiple sites.
 
@@ -312,12 +326,15 @@ def camera_feed_view(request):
     from urllib.parse import urlparse
     go2rtc_port = urlparse(go2rtc_url).port or 1984
 
+    active_site = _requested_site(request.GET.get('site'), sites)
+
     admin = is_admin(request)
     if admin and sites:
-        _inline_posters(sites[0]['streams'])
+        _inline_posters(sites[active_site]['streams'])
 
     return render(request, 'cameras/camera_feeds.html', {
         'sites': sites,
+        'active_site': active_site,
         'go2rtc_url': go2rtc_url,
         'go2rtc_port': go2rtc_port,
         'is_admin': admin,
