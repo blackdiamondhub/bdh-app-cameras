@@ -14,6 +14,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
+from bdh_sdk import events as bus
 from django.db import close_old_connections
 
 from . import config, popups
@@ -30,6 +31,13 @@ TIMEOUT = 30
 TABLE_WAIT = 60
 
 _SMART_TYPES = {"smartDetectZone", "smartDetectLine", "smartAudioDetect"}
+
+# Pushed to open camera pages so the events rail refetches; bursts are coalesced.
+CHANGED_TOPIC = "cameras/events/changed"
+CHANGED_DELAY = 0.25
+
+_changed_timer = None
+_changed_lock = threading.Lock()
 
 _workers = {}
 _started = False
@@ -91,6 +99,24 @@ def normalize_obj(event):
     }
 
 
+def _announce():
+    global _changed_timer
+    with _changed_lock:
+        _changed_timer = None
+    bus.publish(CHANGED_TOPIC)
+
+
+def _changed():
+    """Tell open pages the events changed, at most once per CHANGED_DELAY."""
+    global _changed_timer
+    with _changed_lock:
+        if _changed_timer is not None:
+            return
+        _changed_timer = threading.Timer(CHANGED_DELAY, _announce)
+        _changed_timer.daemon = True
+        _changed_timer.start()
+
+
 def _db(fn):
     def wrapped(*args, **kwargs):
         close_old_connections()
@@ -123,6 +149,8 @@ def _save(site, host, names, rows):
         )
         if row["end"] is not None and obj.thumbnail is None:
             missing.append((row["event_id"], row["kinds"]))
+    if rows:
+        _changed()
     return missing
 
 
@@ -130,7 +158,8 @@ def _save(site, host, names, rows):
 def _save_thumb(event_id, data):
     from .models import ProtectEvent
 
-    ProtectEvent.objects.filter(event_id=event_id).update(thumbnail=data)
+    if ProtectEvent.objects.filter(event_id=event_id).update(thumbnail=data):
+        _changed()
 
 
 @_db

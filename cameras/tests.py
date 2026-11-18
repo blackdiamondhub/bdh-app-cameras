@@ -2301,6 +2301,17 @@ class EventStorageTests(TestCase):
         p = patch.object(ev_mod, "close_old_connections")
         p.start()
         self.addCleanup(p.stop)
+        self.addCleanup(self._settle)
+
+    @staticmethod
+    def _settle():
+        """Let pending change announcements fire so they can't leak into the next test."""
+        import threading
+        for t in threading.enumerate():
+            if isinstance(t, threading.Timer):
+                t.join()
+        from bdh_sdk import events as bus
+        bus.flush()
 
     def test_save_upserts_and_reports_missing_thumbs(self):
         start = dj_tz.now()
@@ -2312,6 +2323,32 @@ class EventStorageTests(TestCase):
         self.assertEqual(ProtectEvent.objects.get().camera_name, "Front")
         ev_mod._save_thumb("e1", b"jpg")
         self.assertEqual(ev_mod._save("S", "h", {}, [row]), [])
+
+    def test_changes_are_pushed_once_per_burst(self):
+        from bdh_sdk import events as bus
+        self._settle()
+        heard = []
+        sub = bus.subscribe("cameras/#", heard.append)
+        self.addCleanup(sub.cancel)
+        row = {"event_id": "e1", "camera_id": "cam1", "kinds": ["person"], "start": dj_tz.now(), "end": None, "score": 50}
+        with patch.object(ev_mod, "CHANGED_DELAY", 0.05):
+            ev_mod._save("S", "h", {"cam1": "Front"}, [row])
+            ev_mod._save("S", "h", {"cam1": "Front"}, [row])
+            ev_mod._save_thumb("e1", b"jpg")
+            ev_mod._save_thumb("missing", b"jpg")  # no row: nothing changed
+            ev_mod._save("S", "h", {}, [])  # nothing to save
+            self._settle()
+            self.assertEqual([e.topic for e in heard], ["cameras/events/changed"])
+            ev_mod._save_thumb("e1", b"jpg2")
+            self._settle()
+        self.assertEqual(len(heard), 2)
+
+    def test_only_admins_hear_pushes(self):
+        from bdh_sdk import push
+        with patch("cameras.views.is_admin", return_value=False):
+            self.assertEqual(push.patterns_for(MagicMock(), "cameras"), [])
+        with patch("cameras.views.is_admin", return_value=True):
+            self.assertEqual(push.patterns_for(MagicMock(), "cameras"), ["cameras/#"])
 
     def test_prune_drops_older_than_24h(self):
         _ev("old", ["person"], minutes_ago=25 * 60)
@@ -2772,6 +2809,7 @@ class EventTemplateTests(TestCase):
         html = Client().get("/cameras/").content.decode()
         self.assertIn('data-camera-id="cam1"', html)
         self.assertNotIn('ev-rail', html)
+        self.assertNotIn('bdh/push.js', html)
         self.assertNotIn('cam-scrub', html)
         self.assertNotIn('<img class="cam-poster"', html)
 
@@ -2786,6 +2824,8 @@ class EventTemplateTests(TestCase):
         # Multi-line {# #} isn't a Django comment: it renders as text that pushes the video down
         self.assertNotIn('{#', html)
         self.assertIn('class="ev-rail"', html)
+        self.assertIn('/static/bdh/push.js', html)
+        self.assertNotIn('setInterval(loadEvents', html)
         self.assertIn('class="cam-scrub"', html)
         self.assertIn('data-kind="person"', html)
         self.assertNotIn('data-kind="motion"', html)

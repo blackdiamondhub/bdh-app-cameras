@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone as dt_timezone
 from functools import wraps
 
-from bdh_sdk import is_admin
+from bdh_sdk import is_admin, push
 from bdh_sdk.rpc import BrokerError
 from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import render
@@ -28,6 +28,12 @@ logger = logging.getLogger(__name__)
 
 CLIP_DEFAULT = timedelta(seconds=30)
 CLIP_MAX = timedelta(seconds=120)
+
+
+@push.authorize
+def push_topics(request):
+    """Only admins see the events rail, so only they hear its updates."""
+    return ["cameras/#"] if is_admin(request) else []
 
 
 def get_go2rtc_streams(go2rtc_url):
