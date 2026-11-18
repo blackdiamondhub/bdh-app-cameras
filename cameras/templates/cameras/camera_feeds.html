@@ -199,9 +199,6 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     .cam-card[data-state="reconnecting"] .cam-status::before { background: #ffc35c; }
     .cam-card[data-state="reconnecting"] .cam-status::after { content: "RECONNECTING"; }
     @keyframes cam-pulse { 50% { opacity: .45; } }
-    /* Test (2.6.0b2): no status badge on grid tiles, to see whether 9 translucent,
-       pulsing badges over live video cost the display painted frames. */
-    .cam-card:not(:fullscreen) .cam-status { display: none; }
 
     .cam-touch-overlay {
         position: absolute;
@@ -847,6 +844,29 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     }
     setInterval(flushEvents, 2000);
     window.addEventListener('pagehide', flushEvents);
+
+    // Test-only ?selfreport=1: every 10 s, log painted-frame drops and the page's
+    // rAF rate through the events endpoint, so the page can be measured when it's
+    // loaded on its own (no hub around it to run the remote `frame state`).
+    if (new URLSearchParams(location.search).get('selfreport') === '1') {
+        let rafN = 0, prev = new Map();
+        const raf = () => { rafN++; requestAnimationFrame(raf); };
+        requestAnimationFrame(raf);
+        setInterval(() => {
+            let decoded = 0, dropped = 0, videos = 0;
+            document.querySelectorAll('video').forEach(v => {
+                const q = v.getVideoPlaybackQuality && v.getVideoPlaybackQuality();
+                if (!q) return;
+                const p = prev.get(v) || q;
+                const d = q.totalVideoFrames - p.totalVideoFrames;
+                if (d > 0) { videos++; decoded += d; dropped += q.droppedVideoFrames - p.droppedVideoFrames; }
+                prev.set(v, { totalVideoFrames: q.totalVideoFrames, droppedVideoFrames: q.droppedVideoFrames });
+            });
+            streamEvent({ k: 'quality', framed: window.top !== window, videos, decoded, dropped,
+                          pct: decoded ? Math.round(1000 * dropped / decoded) / 10 : null, raf: rafN / 10 });
+            rafN = 0;
+        }, 10000);
+    }
     document.addEventListener('visibilitychange', () => { quietAll = performance.now(); });
 
     function watchFrames(el) {
