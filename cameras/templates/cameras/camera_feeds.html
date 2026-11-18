@@ -533,14 +533,14 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
 <div class="sitebar">
     <div class="site-tabs" role="group" aria-label="Location">
         {% for site in sites %}
-        <button type="button" class="site-tab{% if forloop.first %} active{% endif %}" data-site="{{ forloop.counter0 }}" aria-pressed="{% if forloop.first %}true{% else %}false{% endif %}"><i class="fas fa-location-dot"></i>{{ site.name }}</button>
+        <button type="button" class="site-tab{% if forloop.counter0 == active_site %} active{% endif %}" data-site="{{ forloop.counter0 }}" aria-pressed="{% if forloop.counter0 == active_site %}true{% else %}false{% endif %}"><i class="fas fa-location-dot"></i>{{ site.name }}</button>
         {% endfor %}
     </div>
 </div>
 {% endif %}
 
 {% for site in sites %}
-<div class="camera-grid site-panel{% if forloop.first %} active{% endif %}{% if site.hero %} has-hero{% else %} n{{ site.streams|length }}{% endif %}" data-site="{{ forloop.counter0 }}">
+<div class="camera-grid site-panel{% if forloop.counter0 == active_site %} active{% endif %}{% if site.hero %} has-hero{% else %} n{{ site.streams|length }}{% endif %}" data-site="{{ forloop.counter0 }}">
     {% for stream in site.streams %}
     <div class="cam-card{% if site.hero and forloop.first %} hero{% endif %}" data-state="connecting" data-camera-id="{{ stream.camera_id }}" data-name="{{ stream.display_name }}">
             {% if is_admin and stream.camera_id %}

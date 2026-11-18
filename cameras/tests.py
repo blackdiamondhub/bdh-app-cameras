@@ -1648,6 +1648,20 @@ class MultiSiteTabTests(TestCase):
 
     @patch("cameras.views._register_streams_with_go2rtc")
     @patch("cameras.views.get_protect_cameras")
+    def test_site_param_opens_that_tab(self, mock_cameras, mock_register):
+        """?site= opens a tab by name or index; unknown values open the first."""
+        mock_cameras.return_value = [
+            {'name': 'Sun Peaks', 'host': '192.168.10.1', 'cameras': []},
+            {'name': 'Mercer Island', 'host': '192.168.1.26', 'cameras': []},
+        ]
+        for query, expected in [('', 0), ('?site=mercer_island', 1), ('?site=Mercer-Island', 1),
+                                ('?site=1', 1), ('?site=5', 0), ('?site=nowhere', 0)]:
+            response = self.client.get("/cameras/" + query)
+            self.assertEqual(response.context['active_site'], expected, query)
+            self.assertIn(f'class="site-tab active" data-site="{expected}"', response.content.decode())
+
+    @patch("cameras.views._register_streams_with_go2rtc")
+    @patch("cameras.views.get_protect_cameras")
     def test_sites_passed_in_context(self, mock_cameras, mock_register):
         """Context contains sites list with correct structure."""
         mock_cameras.return_value = [
