@@ -1407,6 +1407,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     });
 </script>
 {% if is_admin %}
+<script src="{% static 'bdh/push.js' %}"></script>
 <script type="module">
     const EVENTS_URL = '{% url "camera_events" %}';
     const THUMB_URL = id => '{% url "camera_event_thumb" "EVID" %}'.replace('EVID', encodeURIComponent(id));
@@ -1592,7 +1593,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         }
     }
     loadEvents();
-    setInterval(loadEvents, 30000);
+    BDHPush.live({topics: ['cameras/events/#'], refresh: loadEvents});
 
     function openEvent(ev) {
         const card = document.querySelector(`.cam-card[data-camera-id="${CSS.escape(ev.camera_id)}"]`);
