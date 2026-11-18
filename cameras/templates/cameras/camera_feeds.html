@@ -199,6 +199,9 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     .cam-card[data-state="reconnecting"] .cam-status::before { background: #ffc35c; }
     .cam-card[data-state="reconnecting"] .cam-status::after { content: "RECONNECTING"; }
     @keyframes cam-pulse { 50% { opacity: .45; } }
+    /* Test (2.6.0b2): no status badge on grid tiles, to see whether 9 translucent,
+       pulsing badges over live video cost the display painted frames. */
+    .cam-card:not(:fullscreen) .cam-status { display: none; }
 
     .cam-touch-overlay {
         position: absolute;
