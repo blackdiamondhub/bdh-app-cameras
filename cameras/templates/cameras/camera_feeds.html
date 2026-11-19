@@ -825,10 +825,11 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     const pendingEvents = [];
     const recentEvents = window.__camEvents = [];
     let quietAll = 0;
-    function streamEvent(ev) {
+    function streamEvent(ev, recent = true) {
         ev.t = Date.now();
         pendingEvents.push(ev);
         if (pendingEvents.length > 300) pendingEvents.shift();
+        if (!recent) return;
         recentEvents.push(ev);
         if (recentEvents.length > 50) recentEvents.shift();
     }
@@ -894,14 +895,152 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     }
 
     let rafLast = 0;
+    const rafDt = [];
     const rafTick = now => {
         if (rafLast && quietAll < rafLast && !document.hidden && now - rafLast > FREEZE_MS) {
             streamEvent({ k: 'gap', s: '*raf', ms: Math.round(now - rafLast) });
         }
+        if (rafLast && rafDt.length < 2000) rafDt.push(now - rafLast);
         rafLast = now;
         requestAnimationFrame(rafTick);
     };
     requestAnimationFrame(rafTick);
+
+    // Vitals (display crash hunt): a 'vit' event every 5 s with the window's frame
+    // pacing, timer lateness, long tasks, heap and DOM size, and every 10 s each
+    // stream's decode cost, so the log shows a gradual slowdown (heat, GPU) before
+    // a crash and, being a steady heartbeat, pins when the page stopped running.
+    // Also: a 'boot' event (device/GPU facts), GPU context loss, CPU pressure
+    // changes and uncaught errors.  All cheap: counters plus one sort per 5 s.
+    (() => {
+        const VIT_MS = 5000;
+        const r1 = x => Math.round(x * 10) / 10;
+        const boot = {
+            k: 'boot', ua: navigator.userAgent, cores: navigator.hardwareConcurrency || null,
+            mem_gb: navigator.deviceMemory || null, dpr: window.devicePixelRatio,
+            scr: `${screen.width}x${screen.height}`, secure: window.isSecureContext,
+            framed: window.top !== window,
+            heap_limit_mb: performance.memory ? Math.round(performance.memory.jsHeapSizeLimit / 1048576) : null,
+        };
+        // A 1x1 WebGL context: names the GPU/driver, and is lost (event below) if
+        // the GPU process crashes or the driver resets.
+        try {
+            const gl = document.createElement('canvas').getContext('webgl');
+            if (gl) {
+                const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+                boot.gpu = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+                boot.gpu_vendor = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
+                gl.canvas.addEventListener('webglcontextlost', e => {
+                    e.preventDefault();
+                    streamEvent({ k: 'gl_lost' });
+                });
+                gl.canvas.addEventListener('webglcontextrestored', () => streamEvent({ k: 'gl_restored' }));
+                window.__camGl = gl;
+            }
+        } catch (e) { boot.gpu_err = String(e).slice(0, 100); }
+        if ('PressureObserver' in window) {
+            try {
+                boot.pressure = 'observing';
+                new PressureObserver(recs => {
+                    const r = recs[recs.length - 1];
+                    streamEvent({ k: 'pressure', state: r.state });
+                }).observe('cpu', { sampleInterval: 2000 }).catch(e => streamEvent({ k: 'pressure', err: String(e).slice(0, 100) }));
+            } catch (e) { boot.pressure = String(e).slice(0, 100); }
+        } else boot.pressure = null;
+        streamEvent(boot, false);
+
+        let errN = 0;
+        const err = (msg, src) => {
+            if (++errN > 20) return;
+            streamEvent({ k: 'err', msg: String(msg).slice(0, 200), src: src || null });
+        };
+        setInterval(() => { errN = 0; }, 60000);
+        window.addEventListener('error', e => err(e.message, e.filename ? `${e.filename.split('/').pop()}:${e.lineno}` : null));
+        window.addEventListener('unhandledrejection', e => err(e.reason && (e.reason.stack || e.reason)));
+
+        let longN = 0, longMs = 0, loafN = 0, loafMax = 0, loafBlock = 0;
+        try {
+            new PerformanceObserver(l => l.getEntries().forEach(e => { longN++; longMs += e.duration; }))
+                .observe({ type: 'longtask' });
+        } catch (e) {}
+        try {
+            new PerformanceObserver(l => l.getEntries().forEach(e => {
+                loafN++; loafMax = Math.max(loafMax, e.duration); loafBlock += e.blockingDuration || 0;
+            })).observe({ type: 'long-animation-frame' });
+        } catch (e) {}
+
+        // Timer lateness: a 250 ms interval that fires late means the main thread
+        // (or the whole CPU) was starved.
+        let lateMax = 0, lateExp = performance.now() + 250;
+        setInterval(() => {
+            const now = performance.now();
+            lateMax = Math.max(lateMax, now - lateExp);
+            lateExp = now + 250;
+        }, 250);
+
+        const prevStats = new Map(), prevQ = new WeakMap();
+        async function streamVitals() {
+            const out = [];
+            for (const el of document.querySelectorAll('video-stream')) {
+                if (!el.pc || !el.dataset.active) continue;
+                let rtp;
+                try {
+                    (await el.pc.getStats()).forEach(s => { if (s.type === 'inbound-rtp' && s.kind === 'video') rtp = s; });
+                } catch (e) { continue; }
+                if (!rtp) continue;
+                const name = (el.dataset.streamName || '?') + (el.classList.contains('cam-hi') ? ':hi' : '');
+                const cur = {
+                    ts: rtp.timestamp, dec: rtp.framesDecoded || 0, dt: rtp.totalDecodeTime || 0,
+                    pd: rtp.totalProcessingDelay || 0, drop: rtp.framesDropped || 0, qp: rtp.qpSum || 0,
+                    b: rtp.bytesReceived || 0, fz: rtp.freezeCount || 0, jb: rtp.jitterBufferDelay || 0,
+                    jbn: rtp.jitterBufferEmittedCount || 0,
+                };
+                const p = prevStats.get(el);
+                prevStats.set(el, cur);
+                const v = el.video, q = v && v.getVideoPlaybackQuality && v.getVideoPlaybackQuality();
+                const pq = v && prevQ.get(v);
+                if (q) prevQ.set(v, { t: q.totalVideoFrames, d: q.droppedVideoFrames });
+                if (!p || cur.ts <= p.ts) continue;
+                const n = cur.dec - p.dec, sec = (cur.ts - p.ts) / 1000;
+                out.push({
+                    s: name, fps: r1(n / sec),
+                    dec_ms: n > 0 ? r1((cur.dt - p.dt) * 1000 / n) : null,
+                    proc_ms: n > 0 ? Math.round((cur.pd - p.pd) * 1000 / n) : null,
+                    jb_ms: cur.jbn > p.jbn ? Math.round((cur.jb - p.jb) * 1000 / (cur.jbn - p.jbn)) : null,
+                    qp: n > 0 ? r1((cur.qp - p.qp) / n) : null,
+                    kbps: Math.round((cur.b - p.b) * 8 / 1000 / sec),
+                    drop: cur.drop - p.drop, fz: cur.fz - p.fz,
+                    vdrop: q && pq ? q.droppedVideoFrames - pq.d : null,
+                    dec: rtp.decoderImplementation || null,
+                });
+            }
+            return out;
+        }
+
+        let tick = 0;
+        setInterval(async () => {
+            const d = rafDt.splice(0).sort((a, b) => a - b);
+            const pct = f => d.length ? r1(d[Math.min(d.length - 1, Math.floor(d.length * f))]) : null;
+            const m = performance.memory;
+            const ev = {
+                k: 'vit', age: Math.round((Date.now() - pageT0) / 1000), hidden: document.hidden || undefined,
+                raf: { n: d.length, p50: pct(0.5), p95: pct(0.95), max: pct(1),
+                       j50: d.filter(x => x > 50).length, j100: d.filter(x => x > 100).length },
+                late_max: Math.round(lateMax),
+                lt: longN ? { n: longN, ms: Math.round(longMs) } : undefined,
+                loaf: loafN ? { n: loafN, max: Math.round(loafMax), block: Math.round(loafBlock) } : undefined,
+                heap: m ? [Math.round(m.usedJSHeapSize / 1048576), Math.round(m.totalJSHeapSize / 1048576)] : undefined,
+                dom: document.getElementsByTagName('*').length,
+                gl: window.__camGl ? (window.__camGl.isContextLost() ? 'lost' : 'ok') : undefined,
+            };
+            lateMax = 0; longN = longMs = loafN = loafMax = loafBlock = 0;
+            if (++tick % 2 === 0) {
+                try { ev.st = await streamVitals(); } catch (e) { ev.st_err = String(e).slice(0, 100); }
+            }
+            window.__camVit = ev;
+            streamEvent(ev, false);
+        }, VIT_MS);
+    })();
 
     // Per-tile watchdog.  go2rtc's player doesn't recover from everything (a
     // peer connection the server closes, e.g. on a go2rtc restart, leaves it
@@ -2358,6 +2497,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
                 max_streams: window.__camMaxStreams ?? null,
                 only_streams: window.__camOnlyStreams ?? null,
                 events: (window.__camEvents || []).slice(-30),
+                vit: window.__camVit || null,
             }});
         };
         setTimeout(() => send().catch(() => {}), 5000);
