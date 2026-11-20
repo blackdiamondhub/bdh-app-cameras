@@ -1979,6 +1979,37 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
             f"(took {elapsed:.1f}s) — safeDisconnect may be broken"
         )
 
+    def test_admin_grid_hides_replay_media(self):
+        """Admin-only replay players stay hidden until fullscreen replay.
+
+        A stray `.cam-card video` rule once out-ranked the hide rule, laying
+        two empty <video>s over each live stream; Android WebView paints a
+        play-button placeholder on those, so signed-in users saw no video.
+        """
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+
+        cams = [{'name': 'Test Site', 'host': '192.168.10.1', 'cameras': [
+            {'name': 'Test Cam', 'stream_name': 'test_cam', 'rtsp_url': 'rtsps://x',
+             'rtsp_url_low': '', 'camera_id': 'cam1', 'is_ptz': False, 'ptz_presets': 0},
+        ]}]
+        with patch('cameras.views.is_admin', return_value=True), \
+                patch('cameras.views.get_protect_cameras', return_value=cams), \
+                patch('cameras.views._register_streams_with_go2rtc'), \
+                patch('cameras.views._cached_poster', return_value=None):
+            self.driver.get(f'{self.live_server_url}/cameras/')
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, '.cam-card video.cam-replay'))
+            )
+            shown = self.driver.execute_script("""
+                return [...document.querySelectorAll('.cam-card video, .cam-card img')]
+                    .filter(el => !el.closest('video-stream') && !el.matches('.cam-poster'))
+                    .filter(el => getComputedStyle(el).display !== 'none')
+                    .map(el => el.outerHTML.slice(0, 80));
+            """)
+        self.assertEqual(shown, [])
+
     def test_fullscreen_close_after_next_exits_completely(self):
         """Close after stepping to the next camera leaves fullscreen entirely.
 
