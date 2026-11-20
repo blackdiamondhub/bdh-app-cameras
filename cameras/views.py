@@ -1053,13 +1053,12 @@ def _ha_registry(instance=None):
         from bdh_sdk import ha
 
         kw = {"instance": instance} if instance else {}
-        entities, area_list, devices = ha.ws_commands(
-            {"type": "config/entity_registry/list"},
-            {"type": "config/area_registry/list"},
-            {"type": "config/device_registry/list"},
-            **kw,
-        )
-        names = {a["area_id"]: a.get("name") or "" for a in area_list or []}
+        # ha.registry needs only ha.read (it's trimmed to readable entities);
+        # older hubs send no "areas".
+        got = ha.get_registry(**kw) or {}
+        entities, devices = got.get("entities"), got.get("devices")
+        names = {a["area_id"]: a.get("name") or ""
+                 for a in got.get("areas") or [] if a.get("area_id")}
         devs = {}
         for d in devices or []:
             if d.get("id") and not d.get("disabled_by"):
@@ -1145,7 +1144,7 @@ def _instance_entities(instance, default):
     try:
         reg = _ha_registry(kw.get("instance"))
     except (ha.HAError, BrokerError) as err:
-        # The registries need the admin-only ha.ws grant; fall back to states only.
+        # States only if the registry is unavailable.
         logger.warning("Pop-ups: HA %s registries unavailable: %s", instance, err)
         reg = {"entities": {}, "devices": {}}
     devices = reg["devices"]
