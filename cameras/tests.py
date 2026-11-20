@@ -2433,6 +2433,8 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
         self.assertIsNone(card.get_attribute('data-talk'))
         self.assertEqual(self.driver.execute_script("return window.__talkCalls")[-1][0], 'stop')
         self.assertEqual(hub_heard('hangup')[-1:], ['hangup'])
+
+    def test_popup_without_kiosk_has_sound_but_no_talk(self):
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
 
