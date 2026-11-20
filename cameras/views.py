@@ -541,8 +541,12 @@ def popup(request, camera_id):
     _register_streams_with_go2rtc(config.go2rtc_url(), [camera])
     from urllib.parse import urlparse
     return render(request, 'cameras/popup.html', {
+        'camera_id': camera_id,
         'stream': camera['stream_name'],
         'name': camera['name'],
+        'has_mic': camera.get('has_mic', False),
+        'talk_stream': (talk_stream_name(camera['stream_name'])
+                        if camera.get('talkback') else ''),
         # Inline only: the snapshot view is admin-only and the pop-up is public.
         'poster': _cached_poster(camera_id),
         'go2rtc_port': urlparse(config.go2rtc_url()).port or 1984,

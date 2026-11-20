@@ -2206,11 +2206,8 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
         };
     """
 
-    def _open_talk_page(self, bridge=True, mic_only=False):
-        """Camera page with one two-way (or mic-only) camera on test_cam."""
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-
+    def _patch_talk_cams(self, bridge=True, mic_only=False):
+        """One two-way (or mic-only) camera door1 on test_cam."""
         talkback = {'url': 'rtp://192.168.1.135:7004', 'codec': 'opus', 'rate': 24000}
         cam = {'name': 'Front Door', 'stream_name': 'test_cam', 'rtsp_url': 'rtsps://x',
                'rtsp_url_low': '', 'camera_id': 'door1', 'is_ptz': False, 'ptz_presets': 0,
@@ -2232,6 +2229,13 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
                 'Page.addScriptToEvaluateOnNewDocument', {'source': self.FAKE_BRIDGE})
             self.addCleanup(self.driver.execute_cdp_cmd,
                             'Page.removeScriptToEvaluateOnNewDocument', script)
+
+    def _open_talk_page(self, bridge=True, mic_only=False):
+        """Camera page in fullscreen on the door1 camera."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        self._patch_talk_cams(bridge, mic_only)
         self.driver.get(f'{self.live_server_url}/cameras/')
         card = WebDriverWait(self.driver, 10).until(
             lambda d: d.find_element(By.CSS_SELECTOR, '.cam-card[data-camera-id="door1"]'))
@@ -2321,6 +2325,74 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
         calls = self.driver.execute_script("return window.__talkCalls")
         self.assertNotIn('start', [c[0] for c in calls])
         self.assertIsNone(card.get_attribute('data-talk'))
+
+    def test_popup_in_iframe_talks_and_hears_kiosk_callbacks(self):
+        """The doorbell pop-up (an iframe in the hub) opens with sound on and
+        the mic off, and talk state reaches it.
+
+        The kiosk can only call into its top frame, so it posts each callback
+        into nested frames; without the page's message listener the button
+        stayed stuck "connecting" with no level meter.
+        """
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        self._patch_talk_cams()
+        self.driver.get(f'{self.live_server_url}/cameras/nope/')
+        self.driver.execute_script("""
+            document.body.innerHTML = '<iframe allow="autoplay; fullscreen" '
+                + 'style="width:1100px;height:620px" src="/cameras/popup/door1/"></iframe>';
+        """)
+        frame = WebDriverWait(self.driver, 10).until(
+            lambda d: d.find_element(By.TAG_NAME, 'iframe'))
+        self.driver.switch_to.frame(frame)
+        self.addCleanup(self.driver.switch_to.default_content)
+        card = WebDriverWait(self.driver, 10).until(
+            lambda d: d.find_element(By.CSS_SELECTOR, '.cam-card[data-camera-id="door1"]'))
+        self.assertEqual(card.find_element(By.CSS_SELECTOR, '.cam-spk').get_attribute('aria-pressed'),
+                         'true', 'the pop-up opens with sound on')
+        self.assertTrue(self._shown(card, '.cam-talk'))
+        self.assertIsNone(card.get_attribute('data-talk'), 'the mic must start off')
+        # Bottom-centre, not over the middle of the video
+        box = self.driver.execute_script(
+            "const r = document.querySelector('.cam-talk').getBoundingClientRect();"
+            "return [r.left + r.width / 2, r.bottom, innerWidth, innerHeight];")
+        self.assertAlmostEqual(box[0], box[2] / 2, delta=2)
+        self.assertGreater(box[1], box[3] - 60)
+
+        card.find_element(By.CSS_SELECTOR, '.cam-talk').click()
+        WebDriverWait(self.driver, 5).until(
+            lambda d: d.execute_script("return window.__talkCalls.length > 0"))
+        self.assertEqual(self.driver.execute_script("return window.__talkCalls"),
+                         [['start', 'test_cam_talk', 1984]])
+
+        # What MainActivity.talkJs does from the top frame
+        self.driver.switch_to.default_content()
+        self.driver.execute_script("""
+            for (const [fn, args] of [['state', ['talking', '', 's1']], ['level', [-10]]])
+                frames[0].postMessage({bdhTalk: {fn, args}}, '*');
+        """)
+        self.driver.switch_to.frame(frame)
+        WebDriverWait(self.driver, 3).until(lambda d: card.get_attribute('data-talk') == 'talking')
+        bar = self.driver.execute_script(
+            "return getComputedStyle(document.querySelector('.talk-bars span')).transform")
+        self.assertNotEqual(bar, 'matrix(1, 0, 0, 0.15, 0, 0)', 'level meter did not move')
+        # Only the kiosk's top frame may drive it
+        self.driver.execute_script(
+            "window.postMessage({bdhTalk: {fn: 'state', args: ['stopped', '', 's1']}}, '*')")
+        time.sleep(0.2)
+        self.assertEqual(card.get_attribute('data-talk'), 'talking')
+
+    def test_popup_without_kiosk_has_sound_but_no_talk(self):
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        self._patch_talk_cams(bridge=False)
+        self.driver.get(f'{self.live_server_url}/cameras/popup/door1/')
+        card = WebDriverWait(self.driver, 10).until(
+            lambda d: d.find_element(By.CSS_SELECTOR, '.cam-card'))
+        self.assertTrue(self._shown(card, '.cam-spk'))
+        self.assertFalse(self._shown(card, '.cam-talk'))
 
     def test_mic_camera_sound_choice_is_remembered(self):
         """Mic-only cameras open with sound on; muting sticks for that camera."""
@@ -3285,6 +3357,27 @@ class EventTemplateTests(TestCase):
         self.assertNotContains(resp, 'class="poster"')
         mock_register.assert_called_once()
         self.assertEqual(Client().get("/cameras/popup/nope/").status_code, 404)
+
+    @patch("cameras.views._cached_poster", return_value=None)
+    @patch("cameras.views._register_streams_with_go2rtc")
+    @patch("cameras.views.get_protect_cameras")
+    def test_popup_offers_sound_and_talk_by_camera(self, mock_cameras, _register, _poster):
+        cam = {'name': 'Door', 'stream_name': 'door', 'rtsp_url': 'rtsps://x', 'camera_id': 'd1',
+               'has_mic': True, 'has_speaker': True,
+               'talkback': {'url': 'rtp://1.2.3.4:7004', 'codec': 'opus', 'rate': 24000}}
+        mock_cameras.return_value = [{'name': 'S', 'cameras': [cam]}]
+        html = Client().get("/cameras/popup/d1/").content.decode()
+        self.assertIn('data-has-mic="1" data-talk-stream="door_talk"', html)
+        self.assertIn('class="cam-spk"', html)
+        self.assertIn('class="cam-talk"', html)
+        mock_cameras.return_value = [{'name': 'S', 'cameras': [dict(cam, talkback=None)]}]
+        html = Client().get("/cameras/popup/d1/").content.decode()
+        self.assertNotIn('data-talk-stream', html)
+        self.assertNotIn('class="cam-talk"', html)
+        self.assertIn('class="cam-spk"', html)
+        mock_cameras.return_value = [{'name': 'S', 'cameras': [dict(cam, has_mic=False, talkback=None)]}]
+        html = Client().get("/cameras/popup/d1/").content.decode()
+        self.assertNotIn('class="cam-spk"', html)
 
     @patch("cameras.views._register_streams_with_go2rtc")
     @patch("cameras.views.get_protect_cameras")

@@ -25,12 +25,59 @@ repainting animations stall WebRTC video decode. See README "Display performance
     }
     body[data-state="live"] .state { color: #fff; }
     body[data-state="live"] .state::before { content: "● "; color: #ff4d4d; }
+    .cam-card { position: fixed; inset: 0; }
+    .cam-spk {
+        position: fixed; z-index: 5; top: 56px; right: 16px; width: 56px; height: 56px; border-radius: 50%;
+        display: flex; align-items: center; justify-content: center; padding: 0; cursor: pointer;
+        color: #fff; background: rgba(10,18,28,.7); border: 1px solid rgba(255,255,255,.15);
+    }
+    .cam-spk svg { width: 26px; height: 26px; fill: currentColor; }
+    .cam-spk .spk-off, .cam-spk.on .spk-on { display: block; }
+    .cam-spk .spk-on, .cam-spk.on .spk-off { display: none; }
+    .cam-spk.on { background: rgba(91,164,230,.85); border-color: #9cc9f2; }
+{% include "cameras/_talk_style.html" %}
 </style>
 </head>
 <body data-state="connecting">
 {% if poster %}<img class="poster" alt="" src="{{ poster }}">{% endif %}
+<div class="cam-card" data-camera-id="{{ camera_id }}"{% if has_mic %} data-has-mic="1"{% endif %}{% if talk_stream %} data-talk-stream="{{ talk_stream }}"{% endif %}>
 <video-stream data-stream-name="{{ stream }}" data-mode="{{ video_mode }}" data-fallback-mode="mse"></video-stream>
+{% if has_mic %}<button type="button" class="cam-spk" aria-label="Sound"><svg class="spk-on" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 8v8a4.5 4.5 0 0 0 2.5-4zM14 3.2v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6z"/></svg><svg class="spk-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9v6h4l5 5V4L7 9H3zm13.6 3 2.7-2.7-1.4-1.4-2.7 2.7-2.7-2.7-1.4 1.4 2.7 2.7-2.7 2.7 1.4 1.4 2.7-2.7 2.7 2.7 1.4-1.4z"/></svg></button>{% endif %}
+{% if talk_stream %}<div class="cam-talk-ring"></div>
+<div class="cam-talk-pill"><span class="talk-bars"><span></span><span></span><span></span><span></span><span></span></span><span class="talk-label">Talking</span><span class="talk-timer">0:00</span></div>
+<button type="button" class="cam-talk" aria-label="Talk"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1a7 7 0 0 0 6-6.9h-2z"/></svg></button>
+<div class="cam-talk-toast" role="status"></div>{% endif %}
+</div>
 <div class="state">LIVE</div>
+<script>
+    // Sound and talkback. Sound starts on (the pop-up is for answering the
+    // door); the mic only opens when the talk button is tapped, and only in
+    // the BDH Display kiosk, which provides the native mic bridge.
+    const TALK_URL = '{% url "camera_talk_prepare" %}';
+    const bridge = window.BDHDisplay;
+    const card = document.querySelector('.cam-card');
+    card._soundOn = !!card.dataset.hasMic;
+    if (bridge && typeof bridge.talkStart === 'function' && card.dataset.talkStream) card.classList.add('can-talk');
+    function applyAudio() {
+        const v = card.querySelector('video-stream')?.video;
+        if (v) v.muted = !card._soundOn;
+        const btn = card.querySelector('.cam-spk');
+        if (!btn) return;
+        btn.classList.toggle('on', card._soundOn);
+        btn.setAttribute('aria-pressed', String(card._soundOn));
+    }
+    function talkUnmute() {
+        if (!card._soundOn) { card._soundOn = true; applyAudio(); }
+    }
+    card.querySelector('.cam-spk')?.addEventListener('click', e => {
+        e.stopPropagation();
+        card._soundOn = !card._soundOn;
+        applyAudio();
+    });
+    window.bdhPopupAudio = applyAudio;
+{% include "cameras/_talk_script.html" %}
+    applyAudio();
+</script>
 <script type="module">
     const base = `http://${window.location.hostname}:{{ go2rtc_port }}`;
     await import(`${base}/video-stream.js`);
@@ -95,8 +142,13 @@ repainting animations stall WebRTC video decode. See README "Display performance
         let lastTime = -1;
         let lastProgress = Date.now();
         if (v) {
-            v.muted = true;
+            v.muted = !card._soundOn;
             v.controls = false;
+            // A browser that blocks autoplay with sound mutes the player;
+            // show that rather than a speaker that claims to be on.
+            v.addEventListener('volumechange', () => {
+                if (v.muted && card._soundOn && el.isConnected) { card._soundOn = false; window.bdhPopupAudio(); }
+            });
             v.playsInline = true;
             v.addEventListener('playing', () => { live = true; restarts = 0; document.body.dataset.state = 'live'; waitFrame(el); });
             v.addEventListener('timeupdate', () => { if (!v.paused) waitFrame(el); });
@@ -145,6 +197,7 @@ repainting animations stall WebRTC video decode. See README "Display performance
         }, 500);
     }
 
+    const card = document.querySelector('.cam-card');
     const el = document.querySelector('video-stream');
     start(el, el.dataset.mode);
 </script>
