@@ -2,11 +2,13 @@
 Talk session logic shared by the camera view and the pop-up. Include inside a
 <script>. The page defines TALK_URL, bridge (window.BDHDisplay) and
 talkUnmute(card). Each .cam-card has data-camera-id and a .cam-talk button.
+The page may define talkStateChanged(card, state) to hear connecting/talking/null.
 {% endcomment %}
     const talk = {card: null, id: null, seq: 0, started: 0, timer: 0};
     function setTalkState(card, s) {
         if (s) card.dataset.talk = s;
         else delete card.dataset.talk;
+        if (typeof talkStateChanged === 'function') talkStateChanged(card, s || null);
     }
     function talkToast(card, msg) {
         const t = card.querySelector('.cam-talk-toast');
