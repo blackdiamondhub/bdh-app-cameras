@@ -1225,6 +1225,27 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         });
     }
 
+    // Keep the tile's last frame as its poster, so coming back to the tab
+    // shows a recent still instead of the one from page load.
+    function capturePoster(el) {
+        const v = el.video;
+        const img = el.closest('.cam-card')?.querySelector('.cam-poster');
+        if (!img || !v || !v.videoWidth || !el.classList.contains('has-frame')) return;
+        try {
+            const w = Math.min(v.videoWidth, 640);
+            const c = document.createElement('canvas');
+            c.width = w;
+            c.height = Math.round(v.videoHeight * w / v.videoWidth);
+            c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+            c.toBlob(blob => {
+                if (!blob) return;
+                if (img.dataset.blob) URL.revokeObjectURL(img.src);
+                img.dataset.blob = '1';
+                img.src = URL.createObjectURL(blob);
+            }, 'image/jpeg', 0.8);
+        } catch (e) { /* keep the old poster */ }
+    }
+
     function stopStream(el) {
         // A pending watchdog restart must not outlive the stop, active or not
         clearTimeout(el._restartTID);
@@ -1234,7 +1255,12 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         clearInterval(el._watchdog);
         el._frameWait = false;
         el._frameCbs = [];
+        capturePoster(el);
         safeDisconnect(el);
+        // The <video> keeps its dead source (see safeDisconnect), which would
+        // cover the poster when the tab is shown again; hide it until the
+        // restarted stream presents frames.
+        el.classList.remove('has-frame');
         delete el.dataset.active;
     }
 
