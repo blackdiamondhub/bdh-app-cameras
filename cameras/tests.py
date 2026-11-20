@@ -1995,6 +1995,7 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
              'rtsp_url_low': '', 'camera_id': 'cam1', 'is_ptz': False, 'ptz_presets': 0},
         ]}]
         with patch('cameras.views.is_admin', return_value=True), \
+                patch('cameras.config.protect_sites', return_value=[{'name': 'Test Site'}]), \
                 patch('cameras.views.get_protect_cameras', return_value=cams), \
                 patch('cameras.views._register_streams_with_go2rtc'), \
                 patch('cameras.views._cached_poster', return_value=None):
