@@ -2011,6 +2011,45 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
             """)
         self.assertEqual(shown, [])
 
+    def test_slow_fullscreen_transition_never_shows_grid(self):
+        """Tapping a tile covers the page with it before fullscreen lands.
+
+        Android WebView enters fullscreen in steps (resize, then restyle),
+        so the grid and its tiles being stopped used to flash on screen.
+        """
+        from selenium.webdriver.common.by import By
+
+        self.driver.get(f'{self.live_server_url}/cameras/')
+        self._wait_for_grid_video()
+        # Hold requestFullscreen pending so the transition state is observable
+        self.driver.execute_script("""
+            Element.prototype.requestFullscreen = function () {
+                return new Promise((res, rej) => { window.__fsReject = rej; });
+            };
+        """)
+        card = self.driver.find_element(
+            By.CSS_SELECTOR, 'video-stream[data-stream-name="test_cam"]'
+        ).find_element(By.XPATH, '..')
+        card.find_element(By.CSS_SELECTOR, '.cam-touch-overlay').click()
+
+        covered = self.driver.execute_script("""
+            const card = arguments[0];
+            const r = card.getBoundingClientRect();
+            const pts = [[5, 5], [innerWidth - 5, 5], [5, innerHeight - 5],
+                         [innerWidth - 5, innerHeight - 5], [innerWidth / 2, innerHeight / 2]];
+            return r.width >= innerWidth - 1 && r.height >= innerHeight - 1 &&
+                pts.every(([x, y]) => card.contains(document.elementFromPoint(x, y)));
+        """, card)
+        self.assertTrue(covered, 'tapped tile must cover the page while fullscreen is pending')
+
+        self.driver.execute_script("window.__fsReject(new Error('denied'))")
+        self.driver.execute_script("return new Promise(r => setTimeout(r, 50))")
+        self.assertFalse(
+            self.driver.execute_script(
+                "return !!document.querySelector('.cam-card.fs-pending')"),
+            'cover must clear if fullscreen is refused',
+        )
+
     def test_fullscreen_close_after_next_exits_completely(self):
         """Close after stepping to the next camera leaves fullscreen entirely.
 
@@ -2140,6 +2179,12 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
             lambda d: d.execute_script(
                 "return document.fullscreenElement === null"
             )
+        )
+        WebDriverWait(self.driver, 2).until(
+            lambda d: d.execute_script(
+                "return !document.querySelector('.cam-card.fs-pending')"
+            ),
+            'fullscreen cover left on a tile after exit',
         )
 
         # Grid streams should recover — at least one video element should

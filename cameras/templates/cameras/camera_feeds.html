@@ -274,6 +274,20 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         border: 0;
         border-radius: 0;
     }
+    /* Covers the page with the tapped tile until fullscreen lands, so a slow
+       transition (Android WebView resizes, then restyles) never shows the
+       grid or the other tiles being stopped. */
+    .cam-card.fs-pending {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        aspect-ratio: auto;
+        background: #000;
+        border: 0;
+        border-radius: 0;
+    }
+    .cam-card.fs-pending video-stream,
+    .cam-card.fs-pending video { object-fit: contain; }
     .cam-card:fullscreen video-stream,
     .cam-card:fullscreen video { object-fit: contain; }
     .cam-card:fullscreen .cam-label { font-size: 20px; padding: 10px 20px; left: 24px; bottom: 24px; }
@@ -1507,7 +1521,8 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         overlay.addEventListener('click', () => {
             const card = overlay.closest('.cam-card');
             if (!document.fullscreenElement) {
-                card.requestFullscreen().catch(() => {});
+                card.classList.add('fs-pending');
+                card.requestFullscreen().catch(() => card.classList.remove('fs-pending'));
             } else {
                 exitAllFullscreen();
             }
@@ -1519,6 +1534,12 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         if (!activePanel) return;
 
         if (exitingAll && document.fullscreenElement) return;
+
+        // The cover only bridges the transition; drop it from every card that
+        // isn't the fullscreen element (all of them on exit).
+        document.querySelectorAll('.cam-card.fs-pending').forEach(c => {
+            if (c !== document.fullscreenElement) c.classList.remove('fs-pending');
+        });
 
         if (document.fullscreenElement) {
             // Entering fullscreen — stop every other tile (the display's GPU
