@@ -143,7 +143,12 @@ document.addEventListener('DOMContentLoaded', function () {
     const DEF = 'ha';  // a trigger without ``instance`` is on the default instance
     const K = (inst, id) => (inst || DEF) + '|' + id;
     const multi = () => instances.length > 1;
-    const instName = id => { const i = instances.find(x => x.id === (id || DEF)); return i ? i.name : (id || DEF); };
+    // Two instances can share a name (both "Home Assistant"); fall back to site, then id, so they differ.
+    const label = i => {
+        const n = (i.name || '').trim(), same = x => (x.name || '').trim().toLowerCase() === n.toLowerCase();
+        return n && instances.filter(same).length < 2 ? n : (i.site || i.id);
+    };
+    const instName = id => { const i = instances.find(x => x.id === (id || DEF)); return i ? label(i) : (id || DEF); };
     const isPicked = e => !!picked && K(picked.instance, picked.id) === K(e.instance, e.id);
     const devOf = e => e.device ? devById[K(e.instance, e.device)] : null;
 
@@ -392,7 +397,7 @@ document.addEventListener('DOMContentLoaded', function () {
             if (multi() && (Object.keys(rooms).length || showLoose)) {
                 const shut = collapsed.has(inst.id);
                 const h = el('button', {type: 'button', className: 'cp-inst' + (shut ? ' shut' : '')},
-                    el('h3', {}, inst.name, inst.site ? el('small', {textContent: inst.site}) : null));
+                    el('h3', {}, label(inst), inst.site && inst.site !== label(inst) ? el('small', {textContent: inst.site}) : null));
                 h.setAttribute('aria-expanded', String(!shut));
                 h.addEventListener('click', () => {
                     collapsed.has(inst.id) ? collapsed.delete(inst.id) : collapsed.add(inst.id);
