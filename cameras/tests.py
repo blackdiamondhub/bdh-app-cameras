@@ -2006,7 +2006,7 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
             shown = self.driver.execute_script("""
                 return [...document.querySelectorAll('.cam-card video, .cam-card img')]
                     .filter(el => !el.closest('video-stream') && !el.matches('.cam-poster'))
-                    .filter(el => getComputedStyle(el).display !== 'none')
+                    .filter(el => el.getClientRects().length > 0)
                     .map(el => el.outerHTML.slice(0, 80));
             """)
         self.assertEqual(shown, [])
