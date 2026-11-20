@@ -89,7 +89,7 @@ repainting animations stall WebRTC video decode. See README "Display performance
     // In the hub's alert pop-up, keep it open while the mic is on (the hub
     // pauses its countdown) and let Hang up end the call and close it.
     function tellHub(cmd) {
-        if (window !== window.parent) window.parent.postMessage({bdhAlert: cmd}, '*');
+        if (window !== window.parent) window.parent.postMessage({bdh: 1, type: 'alert', cmd: cmd}, '*');
     }
     function talkStateChanged(c, s) { tellHub(s ? 'hold' : 'release'); }
 {% include "cameras/_talk_script.html" %}

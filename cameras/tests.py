@@ -2401,7 +2401,7 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
         self.driver.get(f'{self.live_server_url}/cameras/nope/')
         self.driver.execute_script("""
             window.__alert = [];
-            addEventListener('message', e => { if (e.data && e.data.bdhAlert) __alert.push(e.data.bdhAlert); });
+            addEventListener('message', e => { const d = e.data; if (d && d.bdh === 1 && d.type === 'alert') __alert.push(d.cmd); });
             document.body.innerHTML = '<iframe style="width:1100px;height:620px" '
                 + 'src="/cameras/popup/door1/"></iframe>';
         """)
