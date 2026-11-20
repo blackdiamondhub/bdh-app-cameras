@@ -2374,9 +2374,16 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
         """)
         self.driver.switch_to.frame(frame)
         WebDriverWait(self.driver, 3).until(lambda d: card.get_attribute('data-talk') == 'talking')
+        # The level message is async too; check the target transform, not the
+        # mid-transition computed one.
+        try:
+            WebDriverWait(self.driver, 3).until(lambda d: d.execute_script(
+                "return document.querySelector('.talk-bars span').style.transform"))
+        except Exception:
+            pass
         bar = self.driver.execute_script(
-            "return getComputedStyle(document.querySelector('.talk-bars span')).transform")
-        self.assertNotEqual(bar, 'matrix(1, 0, 0, 0.15, 0, 0)', 'level meter did not move')
+            "return document.querySelector('.talk-bars span').style.transform")
+        self.assertNotIn(bar, ('', 'scaleY(0.15)'), 'level meter did not move')
         # Only the kiosk's top frame may drive it
         self.driver.execute_script(
             "window.postMessage({bdhTalk: {fn: 'state', args: ['stopped', '', 's1']}}, '*')")
