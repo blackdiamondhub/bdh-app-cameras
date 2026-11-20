@@ -314,6 +314,45 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     .cam-fs-prev, .cam-fs-next { top: 50%; transform: translateY(-50%); }
     .cam-fs-prev { left: 24px; }
     .cam-fs-next { right: 24px; }
+
+    /* Camera audio + talkback */
+    .cam-talk-badge { display: none; margin-left: 8px; font-size: .85em; opacity: .85; }
+    .bdh-talk .cam-talk-badge { display: inline; }
+    .cam-spk { top: 84px; right: 24px; }
+    .cam-spk.on { background: rgba(91,164,230,.85); border-color: #9cc9f2; }
+    .cam-talk, .cam-talk-pill, .cam-talk-toast { display: none; }
+    .cam-card.can-talk .cam-talk {
+        display: flex; position: absolute; z-index: 5; left: 50%; bottom: 24px; transform: translateX(-50%);
+        width: 96px; height: 96px; border-radius: 50%; align-items: center; justify-content: center;
+        font-size: 34px; color: #fff; background: rgba(20,28,44,.82); border: 1px solid rgba(255,255,255,.2);
+        cursor: pointer; transition: bottom .2s;
+    }
+    .cam-card[data-talk="connecting"] .cam-talk { border: 3px dashed #9cc9f2; }
+    .cam-card[data-talk="talking"] .cam-talk {
+        background: #ff4d5e; border: 3px solid #ffd0d5;
+        box-shadow: 0 0 0 10px rgba(255,77,94,.28), 0 0 0 22px rgba(255,77,94,.12);
+    }
+    .cam-talk-ring { display: none; }
+    .cam-card[data-talk="talking"] .cam-talk-ring {
+        display: block; position: absolute; inset: 0; z-index: 4; border: 4px solid #ff4d5e; pointer-events: none;
+    }
+    .cam-card[data-talk="connecting"] .cam-talk-pill,
+    .cam-card[data-talk="talking"] .cam-talk-pill {
+        display: flex; position: absolute; z-index: 5; left: 50%; top: 22px; transform: translateX(-50%);
+        gap: 12px; align-items: center; padding: 9px 18px; border-radius: 999px;
+        background: rgba(255,77,94,.92); color: #fff; font-size: 16px; font-weight: 600; pointer-events: none;
+    }
+    .cam-card[data-talk="connecting"] .cam-talk-pill { background: rgba(40,64,100,.92); }
+    .cam-card[data-talk="connecting"] .talk-bars,
+    .cam-card[data-talk="connecting"] .talk-timer { display: none; }
+    .talk-bars { display: flex; gap: 3px; align-items: flex-end; height: 20px; }
+    .talk-bars span { width: 4px; height: 3px; background: #fff; border-radius: 2px; transition: height .1s; }
+    .talk-timer { font-variant-numeric: tabular-nums; font-weight: 400; opacity: .9; }
+    .cam-talk-toast.show {
+        display: block; position: absolute; z-index: 6; left: 50%; bottom: 140px; transform: translateX(-50%);
+        padding: 14px 18px; border-radius: 14px; font-size: 16px; color: #fff;
+        background: rgba(18,24,38,.95); border: 1px solid #ff8a95; pointer-events: none;
+    }
     .cam-fs-clock {
         position: absolute;
         z-index: 2;
@@ -444,6 +483,8 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
 .cam-card .cam-scrub, .cam-card .cam-replay, .cam-card .cam-still { display: none; }
     .cam-card:fullscreen .cam-scrub { display: flex; }
     .cam-card:fullscreen .cam-label { bottom: 150px; }
+    .cam-card.can-talk:fullscreen:not(.chrome-hidden) .cam-talk { bottom: 150px; }
+    .cam-card.can-talk:fullscreen:not(.chrome-hidden) .cam-talk-toast.show { bottom: 266px; }
     .cam-card:fullscreen .ptz-controls { bottom: 150px; }
     /* Idle fullscreen hides the scrubber; visibility (not just opacity) so
        nothing is painted over the video while it's away. */
@@ -558,7 +599,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
 {% for site in sites %}
 <div class="camera-grid site-panel{% if forloop.counter0 == active_site %} active{% endif %}{% if site.hero %} has-hero{% else %} n{{ site.streams|length }}{% endif %}" data-site="{{ forloop.counter0 }}">
     {% for stream in site.streams %}
-    <div class="cam-card{% if site.hero and forloop.first %} hero{% endif %}" data-state="connecting" data-camera-id="{{ stream.camera_id }}" data-name="{{ stream.display_name }}">
+    <div class="cam-card{% if site.hero and forloop.first %} hero{% endif %}" data-state="connecting" data-camera-id="{{ stream.camera_id }}" data-name="{{ stream.display_name }}"{% if stream.has_mic %} data-has-mic="true"{% endif %}{% if stream.has_speaker %} data-has-speaker="true"{% endif %}{% if stream.talk_stream %} data-talk-stream="{{ stream.talk_stream }}"{% endif %}>
             {% if is_admin and stream.camera_id %}
             {% comment %}Cached stills are inlined (see _inline_posters) so they paint with the page;
                the others' stills load eagerly too, so switching site never shows black.{% endcomment %}
@@ -581,12 +622,21 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         </div>
         {% endif %}
         <div class="cam-status"></div>
-        <div class="cam-label">{{ stream.display_name }}</div>
+        <div class="cam-label">{{ stream.display_name }}{% if stream.talk_stream %}<i class="fas fa-microphone cam-talk-badge" aria-hidden="true"></i>{% endif %}</div>
         <div class="cam-fs-bar">
             <div class="cam-fs-clock"></div>
             <button type="button" class="cam-fs-btn cam-fs-close" aria-label="Close"><i class="fas fa-xmark"></i></button>
             <button type="button" class="cam-fs-btn cam-fs-prev" aria-label="Previous camera"><i class="fas fa-chevron-left"></i></button>
             <button type="button" class="cam-fs-btn cam-fs-next" aria-label="Next camera"><i class="fas fa-chevron-right"></i></button>
+            {% if stream.has_mic %}
+            <button type="button" class="cam-fs-btn cam-spk" aria-label="Camera sound" aria-pressed="false"><i class="fas fa-volume-xmark"></i></button>
+            {% endif %}
+            {% if stream.talk_stream %}
+            <div class="cam-talk-ring"></div>
+            <div class="cam-talk-pill"><span class="talk-bars"><span></span><span></span><span></span><span></span><span></span></span><span class="talk-label">Talking</span><span class="talk-timer">0:00</span></div>
+            <button type="button" class="cam-talk" aria-label="Talk"><i class="fas fa-microphone"></i></button>
+            <div class="cam-talk-toast" role="status"></div>
+            {% endif %}
         </div>
         {% if is_admin and stream.camera_id %}
         <img class="cam-still" alt="">
@@ -1154,7 +1204,15 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         const fallback = el.dataset.fallbackMode;
         el.background = true;
         el.mode = el.dataset.mode;
+        // Only a fullscreen mic camera asks for audio, so go2rtc runs the
+        // opus transcode just while someone is listening.
+        const audioCard = hi && el.closest('.cam-card[data-has-mic]');
+        el.media = audioCard ? 'video,audio' : 'video';
         if (el.video) el.video.muted = true;
+        if (audioCard && el.video && !el.video._audioWatched) {
+            el.video._audioWatched = true;
+            el.video.addEventListener('playing', () => applyAudio(audioCard));
+        }
         watchState(el);
         el._quietAt = performance.now();
         watchFrames(el);
@@ -1318,6 +1376,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         if (document.fullscreenElement !== card || card.classList.contains('hi-live')) return;
         card.classList.add('hi-live');
         stopStream(card.querySelector('video-stream:not(.cam-hi)'));
+        applyAudio(card);
     }
 
     function stopCard(card) {
@@ -1571,7 +1630,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     });
 
     // Fullscreen chrome: close, step to the previous/next camera, clock
-    document.querySelectorAll('.cam-fs-btn').forEach(btn => {
+    document.querySelectorAll('.cam-fs-close, .cam-fs-prev, .cam-fs-next').forEach(btn => {
         btn.addEventListener('click', e => {
             e.stopPropagation();
             const card = btn.closest('.cam-card');
@@ -1594,6 +1653,159 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     }
     setInterval(() => { if (document.fullscreenElement) tickClock(); }, 1000);
     document.addEventListener('fullscreenchange', tickClock);
+
+    // Camera sound (mic cameras) and talkback (speaker cameras).
+    // Talkback needs the BDH Display kiosk's native mic bridge; plain
+    // browsers get sound only.
+    const SOUND_KEY = 'bdhCamSound:';
+    const TALK_URL = '{% url "camera_talk_prepare" %}';
+    const bridge = window.BDHDisplay;
+    const canTalk = !!bridge && typeof bridge.talkStart === 'function';
+    if (canTalk) {
+        document.body.classList.add('bdh-talk');
+        document.querySelectorAll('.cam-card[data-talk-stream]').forEach(c => c.classList.add('can-talk'));
+    }
+
+    // Two-way cameras always open muted; mic-only cameras remember the
+    // choice per camera on this device (default on).
+    function soundPref(card) {
+        if (card.dataset.hasSpeaker) return false;
+        try { return localStorage.getItem(SOUND_KEY + card.dataset.cameraId) !== 'off'; } catch (e) { return true; }
+    }
+    function applyAudio(card) {
+        if (!card || !card.dataset.hasMic) return;
+        const on = document.fullscreenElement === card && !!card._soundOn;
+        const v = card.querySelector('video-stream.cam-hi')?.video;
+        if (v) v.muted = !on;
+        const btn = card.querySelector('.cam-spk');
+        if (!btn) return;
+        btn.classList.toggle('on', on);
+        btn.setAttribute('aria-pressed', String(on));
+        btn.querySelector('i').className = 'fas ' + (on ? 'fa-volume-high' : 'fa-volume-xmark');
+    }
+    function setSound(card, on, remember) {
+        card._soundOn = on;
+        if (remember && !card.dataset.hasSpeaker) {
+            try { localStorage.setItem(SOUND_KEY + card.dataset.cameraId, on ? 'on' : 'off'); } catch (e) {}
+        }
+        applyAudio(card);
+    }
+    document.querySelectorAll('.cam-spk').forEach(btn => btn.addEventListener('click', e => {
+        e.stopPropagation();
+        const card = btn.closest('.cam-card');
+        setSound(card, !card._soundOn, true);
+    }));
+
+    const talk = {card: null, id: null, seq: 0, started: 0, timer: 0};
+    function setTalkState(card, s) {
+        if (s) card.dataset.talk = s;
+        else delete card.dataset.talk;
+    }
+    function talkToast(card, msg) {
+        const t = card.querySelector('.cam-talk-toast');
+        if (!t) return;
+        t.textContent = msg;
+        t.classList.add('show');
+        clearTimeout(t._tid);
+        t._tid = setTimeout(() => t.classList.remove('show'), 4000);
+    }
+    function renderTalkTimer() {
+        const card = talk.card;
+        if (!card) return;
+        const s = Math.floor((Date.now() - talk.started) / 1000);
+        card.querySelector('.talk-timer').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    }
+    function endTalk() {
+        const card = talk.card;
+        talk.card = null;
+        talk.id = null;
+        talk.seq++;
+        clearInterval(talk.timer);
+        if (card) setTalkState(card, null);
+        return card;
+    }
+    function stopTalk() {
+        if (!talk.card) return;
+        endTalk();
+        try { bridge.talkStop(); } catch (e) {}
+    }
+    function talkFailed(card, detail) {
+        console.warn('talkback failed:', detail);
+        stopTalk();
+        talkToast(card, "Can't access the microphone");
+    }
+    async function startTalk(card) {
+        const seq = ++talk.seq;
+        talk.card = card;
+        talk.id = null;
+        setTalkState(card, 'connecting');
+        card.querySelector('.cam-talk-toast')?.classList.remove('show');
+        // Talking means listening too; this unmute isn't remembered.
+        if (!card._soundOn) { card._soundOn = true; applyAudio(card); }
+        try {
+            const r = await fetch(`${TALK_URL}?camera=${encodeURIComponent(card.dataset.cameraId)}`, {
+                method: 'POST',
+                headers: {'X-CSRFToken': '{{ csrf_token }}'},
+            });
+            if (!r.ok) throw new Error(`prepare HTTP ${r.status}`);
+            const {stream, port} = await r.json();
+            if (seq !== talk.seq) return;
+            talk.id = bridge.talkStart(stream, port) ?? null;
+        } catch (err) {
+            if (seq === talk.seq) talkFailed(card, String(err));
+        }
+    }
+    // Native side reports progress here; `id` (from talkStart) lets a late
+    // callback from an earlier session be ignored.
+    window.bdhTalk = {
+        state(s, detail, id) {
+            const card = talk.card;
+            if (!card || (id != null && talk.id != null && String(id) !== String(talk.id))) return;
+            if (s === 'talking') {
+                setTalkState(card, 'talking');
+                talk.started = Date.now();
+                clearInterval(talk.timer);
+                renderTalkTimer();
+                talk.timer = setInterval(renderTalkTimer, 500);
+            } else if (s === 'error') {
+                talkFailed(card, detail);
+            } else if (s === 'stopped') {
+                endTalk();
+            }
+        },
+        level(dbfs) {
+            const card = talk.card;
+            if (!card) return;
+            const v = Math.max(0, Math.min(1, (Number(dbfs) + 60) / 60)) * 5;
+            card.querySelectorAll('.talk-bars span').forEach((b, i) => {
+                b.style.height = `${3 + 17 * Math.max(0, Math.min(1, v - i))}px`;
+            });
+        },
+    };
+    document.querySelectorAll('.cam-talk').forEach(btn => btn.addEventListener('click', e => {
+        e.stopPropagation();
+        const card = btn.closest('.cam-card');
+        const mine = talk.card === card;
+        stopTalk();
+        if (!mine) startTalk(card);
+    }));
+
+    document.addEventListener('fullscreenchange', () => {
+        const fs = document.fullscreenElement;
+        document.querySelectorAll('.cam-card[data-has-mic]').forEach(card => {
+            if (card !== fs) {
+                card._inFs = false;
+                card._soundOn = false;
+            } else if (!card._inFs) {
+                card._inFs = true;
+                card._soundOn = soundPref(card);
+            }
+            applyAudio(card);
+        });
+        if (talk.card && talk.card !== fs) stopTalk();
+    });
+    document.addEventListener('visibilitychange', () => { if (document.hidden) stopTalk(); });
+    window.addEventListener('pagehide', stopTalk);
 
     // PTZ preset buttons
     document.querySelectorAll('.ptz-btn').forEach(btn => {

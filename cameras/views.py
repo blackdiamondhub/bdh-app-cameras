@@ -22,7 +22,9 @@ from django.views.decorators.http import require_GET, require_POST
 
 from . import clips, config, events, frames, popups
 from .models import ProtectEvent
-from .protect_api import get_protect_cameras, ptz_goto_preset
+from .protect_api import (
+    get_protect_cameras, ptz_goto_preset, refresh_talkback, talk_stream_name, talkback_source,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +81,20 @@ def _remember_streams(go2rtc_url, cameras):
     """Add the cameras' high/low streams to the keeper's set; returns them."""
     wanted = {}
     for camera in cameras:
-        wanted[camera['stream_name']] = camera['rtsp_url']
         low_url = camera.get('rtsp_url_low', '')
+        if camera.get('has_mic'):
+            # Protect sends AAC, which WebRTC can't play; go2rtc only runs
+            # this ffmpeg opus track while a viewer asks for audio.
+            audio_src = low_url or camera['rtsp_url']
+            wanted[camera['stream_name']] = (
+                camera['rtsp_url'], f"ffmpeg:{audio_src}#audio=opus",
+            )
+        else:
+            wanted[camera['stream_name']] = camera['rtsp_url']
         if low_url:
             wanted[f"{camera['stream_name']}_low"] = low_url
+        if camera.get('talkback'):
+            wanted[talk_stream_name(camera['stream_name'])] = talkback_source(camera['talkback'])
     with _keeper_lock:
         _wanted.setdefault(go2rtc_url, {}).update(wanted)
     return wanted
@@ -125,8 +137,8 @@ def _sync_streams(go2rtc_url, wanted, require_listing=False):
         existing = {}
 
     to_register = [
-        (name, url) for name, url in wanted.items()
-        if name not in existing or url not in existing[name]
+        (name, srcs) for name, srcs in wanted.items()
+        if name not in existing or not set(_as_sources(srcs)) <= existing[name]
     ]
     if to_register:
         with ThreadPoolExecutor(max_workers=8) as pool:
@@ -181,11 +193,18 @@ def _stream_sources(data):
     return sources
 
 
-def _put_stream(go2rtc_url, name, rtsp_url):
-    """Register a single stream with go2rtc."""
+def _as_sources(srcs):
+    """A wanted entry is one source URL or a tuple of them."""
+    return (srcs,) if isinstance(srcs, str) else tuple(srcs)
+
+
+def _put_stream(go2rtc_url, name, srcs):
+    """Register a single stream (with one or more sources) with go2rtc."""
     try:
-        src = urllib.parse.quote(rtsp_url, safe='')
-        url = f"{go2rtc_url}/api/streams?name={name}&src={src}"
+        query = '&'.join(
+            'src=' + urllib.parse.quote(s, safe='') for s in _as_sources(srcs)
+        )
+        url = f"{go2rtc_url}/api/streams?name={name}&{query}"
         req = urllib.request.Request(url, method='PUT', data=b'')
         with urllib.request.urlopen(req, timeout=5):
             pass
@@ -308,6 +327,10 @@ def camera_feed_view(request):
                     'preset_range': list(range(cam.get('ptz_presets', 0))),
                     'has_low': bool(cam.get('rtsp_url_low', '')),
                     'is_doorbell': cam.get('is_doorbell', False),
+                    'has_mic': cam.get('has_mic', False),
+                    'has_speaker': cam.get('has_speaker', False),
+                    'talk_stream': (talk_stream_name(cam['stream_name'])
+                                    if cam.get('talkback') else ''),
                 }
                 for cam in all_cameras
             ]
@@ -525,6 +548,30 @@ def popup(request, camera_id):
         'go2rtc_port': urlparse(config.go2rtc_url()).port or 1984,
         'video_mode': config.video_mode(),
     })
+
+
+@require_POST
+def talk_prepare(request):
+    """Refresh a speaker camera's talkback target before the kiosk starts talking.
+
+    Re-registers ``<stream>_talk`` if Protect moved it. Returns
+    ``{"stream": ..., "port": ...}`` for ``BDHDisplay.talkStart``.
+    """
+    camera_id = request.GET.get('camera', '')
+    if camera_id and not request.user.is_authenticated:
+        visible = get_protect_cameras()[:1]
+        if not any(c.get('camera_id') == camera_id for s in visible for c in s.get('cameras', [])):
+            camera_id = ''
+    cam = refresh_talkback(camera_id) if camera_id else None
+    if cam is None:
+        return JsonResponse({'error': 'talkback unavailable'}, status=404)
+    go2rtc_url = config.go2rtc_url()
+    name = talk_stream_name(cam['stream_name'])
+    source = talkback_source(cam['talkback'])
+    with _keeper_lock:
+        _wanted.setdefault(go2rtc_url, {})[name] = source
+    _sync_streams(go2rtc_url, {name: source})
+    return JsonResponse({'stream': name, 'port': urllib.parse.urlparse(go2rtc_url).port or 1984})
 
 
 @require_POST

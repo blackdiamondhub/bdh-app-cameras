@@ -173,6 +173,41 @@ class FetchCamerasFromSiteTests(TestCase):
 
     @patch('cameras.protect_api.requests.post')
     @patch('cameras.protect_api.requests.get')
+    def test_audio_flags_and_talkback(self, mock_get, mock_post):
+        """Mic/speaker flags come from Protect; only speaker cameras get a talkback target."""
+        def get_side_effect(url, **kwargs):
+            if url.endswith('/cameras'):
+                return _make_mock_response([
+                    {'id': 'door', 'name': 'Door', 'state': 'CONNECTED',
+                     'featureFlags': {'hasMic': True, 'hasSpeaker': True}},
+                    {'id': 'yard', 'name': 'Yard', 'state': 'CONNECTED',
+                     'featureFlags': {'hasMic': True}},
+                    {'id': 'muted', 'name': 'Muted', 'state': 'CONNECTED', 'isMicEnabled': False,
+                     'featureFlags': {'hasMic': True}},
+                ])
+            return _make_mock_response(MOCK_RTSPS_FRONT)
+
+        def post_side_effect(url, **kwargs):
+            if '/ptz/' in url:
+                return _make_ptz_not_supported_response()
+            if url.endswith('/talkback-session'):
+                self.assertIn('/cameras/door/', url)
+                return _make_mock_response({'url': 'rtp://192.168.10.232:7004',
+                                            'codec': 'opus', 'samplingRate': 24000})
+            return _make_mock_response(MOCK_RTSPS_FRONT)
+
+        mock_get.side_effect = get_side_effect
+        mock_post.side_effect = post_side_effect
+
+        cams = {c['camera_id']: c for c in _fetch_cameras_from_site('192.168.10.1', 'k')}
+        self.assertEqual({k: (c['has_mic'], c['has_speaker']) for k, c in cams.items()},
+                         {'door': (True, True), 'yard': (True, False), 'muted': (False, False)})
+        self.assertEqual(cams['door']['talkback'],
+                         {'url': 'rtp://192.168.10.232:7004', 'codec': 'opus', 'rate': 24000})
+        self.assertIsNone(cams['yard']['talkback'])
+
+    @patch('cameras.protect_api.requests.post')
+    @patch('cameras.protect_api.requests.get')
     def test_creates_stream_when_none_exists(self, mock_get, mock_post):
         """Creates RTSPS stream via POST when GET returns null URLs."""
         def get_side_effect(url, **kwargs):
@@ -1060,6 +1095,39 @@ class StreamKeeperTests(TestCase):
 
     @patch("cameras.views._put_stream")
     @patch("cameras.views.urllib.request.urlopen")
+    def test_mic_camera_gets_opus_audio_source(self, mock_urlopen, mock_put):
+        cam = dict(self.CAMS[0], has_mic=True)
+        hi = {'url': 'rtsps://host:7441/abc'}
+        opus = {'url': 'ffmpeg:rtsps://host:7441/abc_low#audio=opus'}
+        low = {'producers': [{'url': 'rtsps://host:7441/abc_low'}]}
+
+        # Only the video source is registered: re-PUT with both sources.
+        mock_urlopen.return_value = self._listing(
+            {'front_door': {'producers': [hi]}, 'front_door_low': low})
+        _register_streams_with_go2rtc(self.URL, [cam])
+        mock_put.assert_called_once_with(
+            self.URL, 'front_door',
+            ('rtsps://host:7441/abc', 'ffmpeg:rtsps://host:7441/abc_low#audio=opus'))
+
+        # Both sources present: nothing to do.
+        mock_put.reset_mock()
+        mock_urlopen.return_value = self._listing(
+            {'front_door': {'producers': [hi, opus]}, 'front_door_low': low})
+        _register_streams_with_go2rtc(self.URL, [cam])
+        mock_put.assert_not_called()
+
+    @patch("cameras.views.urllib.request.urlopen")
+    def test_put_stream_sends_every_source(self, mock_urlopen):
+        from .views import _put_stream
+        _put_stream(self.URL, 'cam', ('rtsps://h/a', 'ffmpeg:rtsps://h/b#audio=opus'))
+        url = mock_urlopen.call_args.args[0].full_url
+        self.assertEqual(
+            url,
+            f'{self.URL}/api/streams?name=cam&src=rtsps%3A%2F%2Fh%2Fa'
+            '&src=ffmpeg%3Artsps%3A%2F%2Fh%2Fb%23audio%3Dopus')
+
+    @patch("cameras.views._put_stream")
+    @patch("cameras.views.urllib.request.urlopen")
     def test_waits_while_go2rtc_is_down(self, mock_urlopen, mock_put):
         """No PUT storm (and no warning per stream) while go2rtc is restarting."""
         mock_urlopen.return_value = self._listing(self._all_present())
@@ -1449,6 +1517,123 @@ class PtzGotoViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+
+
+class ParseTalkbackTests(SimpleTestCase):
+    def parse(self, **over):
+        from .protect_api import _parse_talkback
+        return _parse_talkback({'url': 'rtp://192.168.1.135:7004', 'codec': 'opus',
+                                'samplingRate': 24000, **over})
+
+    def test_usable_session(self):
+        self.assertEqual(self.parse(),
+                         {'url': 'rtp://192.168.1.135:7004', 'codec': 'opus', 'rate': 24000})
+
+    def test_rejects_what_go2rtc_would_refuse(self):
+        for over in ({'codec': 'aac'}, {'samplingRate': 44100}, {'url': 'rtp://8.8.8.8:7004'},
+                     {'url': 'rtp://192.168.1.135:0'}, {'url': 'rtp://192.168.1.999:7004'},
+                     {'url': 'udp://192.168.1.135:7004'}, {'url': None}):
+            with self.subTest(over=over):
+                self.assertIsNone(self.parse(**over))
+
+    def test_rejects_non_dict(self):
+        from .protect_api import _parse_talkback
+        self.assertIsNone(_parse_talkback(['x']))
+
+
+class GetTalkbackTests(TestCase):
+    SESSION = {'url': 'rtp://192.168.1.135:7004', 'codec': 'opus', 'samplingRate': 24000}
+
+    def setUp(self):
+        django_cache.clear()
+        self.addCleanup(django_cache.clear)
+
+    def _resp(self, data):
+        resp = MagicMock()
+        resp.json.return_value = data
+        return resp
+
+    @patch('cameras.protect_api._request')
+    def test_cached_until_refresh(self, mock_request):
+        from .protect_api import _get_talkback
+        mock_request.return_value = self._resp(self.SESSION)
+        first = _get_talkback('nvr', 'k', 'cam1')
+        self.assertEqual(_get_talkback('nvr', 'k', 'cam1'), first)
+        self.assertEqual(mock_request.call_count, 1)
+        _get_talkback('nvr', 'k', 'cam1', refresh=True)
+        self.assertEqual(mock_request.call_count, 2)
+        self.assertEqual(mock_request.call_args.args[1],
+                         'https://nvr/proxy/protect/integration/v1/cameras/cam1/talkback-session')
+
+    @patch('cameras.protect_api._request')
+    def test_failures_are_not_cached(self, mock_request):
+        import requests
+        from .protect_api import _get_talkback
+        mock_request.side_effect = requests.ConnectionError('down')
+        with self.assertLogs('cameras.protect_api', level='WARNING'):
+            self.assertIsNone(_get_talkback('nvr', 'k', 'cam1'))
+        mock_request.side_effect = None
+        mock_request.return_value = self._resp({'codec': 'aac'})
+        with self.assertLogs('cameras.protect_api', level='WARNING'):
+            self.assertIsNone(_get_talkback('nvr', 'k', 'cam1'))
+        mock_request.return_value = self._resp(self.SESSION)
+        self.assertIsNotNone(_get_talkback('nvr', 'k', 'cam1'))
+
+
+class TalkPrepareViewTests(TestCase):
+    URL = '/cameras/api/talk/prepare/'
+    TALKBACK = {'url': 'rtp://192.168.1.135:7004', 'codec': 'opus', 'rate': 24000}
+    SITES = [
+        {'name': 'Home', 'cameras': [{'camera_id': 'door', 'stream_name': 'front_door'}]},
+        {'name': 'Cabin', 'cameras': [{'camera_id': 'cabin', 'stream_name': 'cabin_door'}]},
+    ]
+
+    def setUp(self):
+        from . import views
+        views._wanted.clear()
+        self.addCleanup(views._wanted.clear)
+        self.wanted = views._wanted
+        for target, kw in (('cameras.views.get_protect_cameras', {'return_value': self.SITES}),
+                           ('cameras.views._sync_streams', {}),
+                           ('cameras.views.config.go2rtc_url', {'return_value': 'http://h:11900'})):
+            p = patch(target, **kw)
+            setattr(self, target.rsplit('.', 1)[1], p.start())
+            self.addCleanup(p.stop)
+
+    def _camera(self, camera_id):
+        cam = next(c for s in self.SITES for c in s['cameras'] if c['camera_id'] == camera_id)
+        return dict(cam, has_speaker=True, talkback=self.TALKBACK)
+
+    def test_rejects_get(self):
+        self.assertEqual(self.client.get(self.URL + '?camera=door').status_code, 405)
+
+    @patch('cameras.views.refresh_talkback')
+    def test_registers_talk_stream(self, mock_refresh):
+        mock_refresh.side_effect = self._camera
+        response = self.client.post(self.URL + '?camera=door')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {'stream': 'front_door_talk', 'port': 11900})
+        source = 'talkback:rtp://192.168.1.135:7004?codec=opus&rate=24000'
+        self.assertEqual(self.wanted['http://h:11900']['front_door_talk'], source)
+        self._sync_streams.assert_called_once_with('http://h:11900', {'front_door_talk': source})
+
+    @patch('cameras.views.refresh_talkback', return_value=None)
+    def test_unavailable_is_404(self, mock_refresh):
+        for query in ('?camera=door', ''):
+            with self.subTest(query=query):
+                self.assertEqual(self.client.post(self.URL + query).status_code, 404)
+        self._sync_streams.assert_not_called()
+
+    @patch('cameras.views.refresh_talkback')
+    def test_guests_only_talk_to_first_site(self, mock_refresh):
+        mock_refresh.side_effect = self._camera
+        self.assertEqual(self.client.post(self.URL + '?camera=cabin').status_code, 404)
+        mock_refresh.assert_not_called()
+        self.assertEqual(self.client.post(self.URL + '?camera=door').status_code, 200)
+
+        user = User.objects.create_user('staff', password='pw')
+        self.client.force_login(user)
+        self.assertEqual(self.client.post(self.URL + '?camera=cabin').status_code, 200)
 
 
 class RtcDiagViewTests(TestCase):
@@ -2010,6 +2195,153 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
                     .map(el => el.outerHTML.slice(0, 80));
             """)
         self.assertEqual(shown, [])
+
+    FAKE_BRIDGE = """
+        window.__talkCalls = [];
+        window.BDHDisplay = {
+            info() { return '{}'; },
+            reload() {},
+            talkStart(stream, port) { window.__talkCalls.push(['start', stream, port]); return 's1'; },
+            talkStop() { window.__talkCalls.push(['stop']); },
+        };
+    """
+
+    def _open_talk_page(self, bridge=True, mic_only=False):
+        """Camera page with one two-way (or mic-only) camera on test_cam."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        talkback = {'url': 'rtp://192.168.1.135:7004', 'codec': 'opus', 'rate': 24000}
+        cam = {'name': 'Front Door', 'stream_name': 'test_cam', 'rtsp_url': 'rtsps://x',
+               'rtsp_url_low': '', 'camera_id': 'door1', 'is_ptz': False, 'ptz_presets': 0,
+               'has_mic': True, 'has_speaker': not mic_only,
+               'talkback': None if mic_only else talkback}
+        cams = [{'name': 'Test Site', 'host': '192.168.10.1', 'cameras': [cam]}]
+        for p in (
+            patch('cameras.config.protect_sites', return_value=[{'name': 'Test Site'}]),
+            patch('cameras.views.get_protect_cameras', return_value=cams),
+            patch('cameras.views._register_streams_with_go2rtc'),
+            patch('cameras.views._cached_poster', return_value=None),
+            patch('cameras.views.refresh_talkback', return_value=dict(cam, talkback=talkback)),
+            patch('cameras.views._sync_streams'),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        if bridge:
+            script = self.driver.execute_cdp_cmd(
+                'Page.addScriptToEvaluateOnNewDocument', {'source': self.FAKE_BRIDGE})
+            self.addCleanup(self.driver.execute_cdp_cmd,
+                            'Page.removeScriptToEvaluateOnNewDocument', script)
+        self.driver.get(f'{self.live_server_url}/cameras/')
+        card = WebDriverWait(self.driver, 10).until(
+            lambda d: d.find_element(By.CSS_SELECTOR, '.cam-card[data-camera-id="door1"]'))
+        card.find_element(By.CSS_SELECTOR, '.cam-touch-overlay').click()
+        try:
+            WebDriverWait(self.driver, 3).until(
+                lambda d: d.execute_script("return document.fullscreenElement === arguments[0]", card))
+        except Exception:
+            self.skipTest('Browser did not enter fullscreen')
+        return card
+
+    def _shown(self, card, selector):
+        return self.driver.execute_script(
+            "const el = arguments[0].querySelector(arguments[1]);"
+            "return !!el && el.getClientRects().length > 0;", card, selector)
+
+    def test_talk_button_needs_kiosk_bridge(self):
+        """A plain browser gets sound but no talk button (no native mic path)."""
+        card = self._open_talk_page(bridge=False)
+        self.assertFalse(self._shown(card, '.cam-talk'))
+        self.assertTrue(self._shown(card, '.cam-spk'))
+
+    def test_talk_button_needs_speaker(self):
+        card = self._open_talk_page(mic_only=True)
+        self.assertFalse(self._shown(card, '.cam-talk'))
+        self.assertTrue(self._shown(card, '.cam-spk'))
+
+    def test_talk_tap_starts_native_talk_and_unmutes(self):
+        """Talk opens muted, a tap unmutes and starts the bridge; native
+        callbacks drive the UI, and leaving fullscreen stops talking."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        card = self._open_talk_page()
+        spk = card.find_element(By.CSS_SELECTOR, '.cam-spk')
+        self.assertEqual(spk.get_attribute('aria-pressed'), 'false',
+                         'two-way cameras must open muted')
+        self.assertTrue(self._shown(card, '.cam-talk'))
+
+        card.find_element(By.CSS_SELECTOR, '.cam-talk').click()
+        WebDriverWait(self.driver, 5).until(
+            lambda d: d.execute_script("return window.__talkCalls.length > 0"))
+        self.assertEqual(self.driver.execute_script("return window.__talkCalls"),
+                         [['start', 'test_cam_talk', 1984]])
+        self.assertEqual(spk.get_attribute('aria-pressed'), 'true')
+        self.assertEqual(card.get_attribute('data-talk'), 'connecting')
+
+        self.driver.execute_script("bdhTalk.state('talking', '', 's1'); bdhTalk.level(-10)")
+        self.assertEqual(card.get_attribute('data-talk'), 'talking')
+        self.assertTrue(self._shown(card, '.cam-talk-pill'))
+        self.assertTrue(self._shown(card, '.cam-talk-ring'))
+        # A late callback from an older session must not end this one
+        self.driver.execute_script("bdhTalk.state('stopped', '', 'old')")
+        self.assertEqual(card.get_attribute('data-talk'), 'talking')
+
+        self.driver.execute_script("document.exitFullscreen()")
+        WebDriverWait(self.driver, 3).until(
+            lambda d: d.execute_script("return window.__talkCalls.length === 2"))
+        self.assertEqual(self.driver.execute_script("return window.__talkCalls[1]"), ['stop'])
+        self.assertIsNone(card.get_attribute('data-talk'))
+
+    def test_talk_error_shows_generic_toast(self):
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        card = self._open_talk_page()
+        card.find_element(By.CSS_SELECTOR, '.cam-talk').click()
+        WebDriverWait(self.driver, 5).until(
+            lambda d: d.execute_script("return window.__talkCalls.length > 0"))
+        self.driver.execute_script("bdhTalk.state('error', 'permission denied', 's1')")
+        toast = card.find_element(By.CSS_SELECTOR, '.cam-talk-toast')
+        self.assertTrue(self._shown(card, '.cam-talk-toast.show'))
+        self.assertEqual(toast.text, "Can't access the microphone")
+        self.assertIsNone(card.get_attribute('data-talk'))
+        self.assertEqual(self.driver.execute_script("return window.__talkCalls[1]"), ['stop'])
+
+    def test_talk_prepare_failure_shows_toast(self):
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        card = self._open_talk_page()
+        with patch('cameras.views.refresh_talkback', return_value=None):
+            card.find_element(By.CSS_SELECTOR, '.cam-talk').click()
+            WebDriverWait(self.driver, 5).until(
+                lambda d: d.execute_script(
+                    "return !!document.querySelector('.cam-talk-toast.show')"))
+        calls = self.driver.execute_script("return window.__talkCalls")
+        self.assertNotIn('start', [c[0] for c in calls])
+        self.assertIsNone(card.get_attribute('data-talk'))
+
+    def test_mic_camera_sound_choice_is_remembered(self):
+        """Mic-only cameras open with sound on; muting sticks for that camera."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        self.driver.get(f'{self.live_server_url}/cameras/')
+        self.driver.execute_script("localStorage.clear()")
+        card = self._open_talk_page(mic_only=True)
+        spk = card.find_element(By.CSS_SELECTOR, '.cam-spk')
+        self.assertEqual(spk.get_attribute('aria-pressed'), 'true')
+        spk.click()
+        self.assertEqual(spk.get_attribute('aria-pressed'), 'false')
+
+        self.driver.execute_script("document.exitFullscreen()")
+        WebDriverWait(self.driver, 3).until(
+            lambda d: d.execute_script("return document.fullscreenElement === null"))
+        card.find_element(By.CSS_SELECTOR, '.cam-touch-overlay').click()
+        WebDriverWait(self.driver, 3).until(
+            lambda d: d.execute_script("return document.fullscreenElement === arguments[0]", card))
+        self.assertEqual(spk.get_attribute('aria-pressed'), 'false')
 
     def test_slow_fullscreen_transition_never_shows_grid(self):
         """Tapping a tile covers the page with it before fullscreen lands.

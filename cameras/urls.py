@@ -4,6 +4,7 @@ from . import views
 urlpatterns = [
     path('', views.camera_feed_view, name='cameras'),
     path('ptz/goto/', views.ptz_goto, name='ptz_goto'),
+    path('api/talk/prepare/', views.talk_prepare, name='camera_talk_prepare'),
     path('diag/rtc/', views.rtc_diag, name='camera_rtc_diag'),
     path('diag/events/', views.rtc_events, name='camera_rtc_events'),
     path('events/', views.events_json, name='camera_events'),

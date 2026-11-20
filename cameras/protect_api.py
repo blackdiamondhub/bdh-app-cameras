@@ -10,7 +10,9 @@ Uses the UniFi Protect Integration (Public) API with API key auth.
 Auth: X-API-KEY header
 """
 
+import ipaddress
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -309,6 +311,98 @@ def _is_ptz_camera(host, api_key, camera_id, camera_type=''):
     return None
 
 
+TALKBACK_CACHE_KEY_PREFIX = 'protect_talkback_'
+TALKBACK_CACHE_TTL = 24 * 3600
+TALKBACK_RATES = (8000, 12000, 16000, 24000, 48000)
+_TALKBACK_URL = re.compile(r'^rtp://(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})$')
+
+
+def _parse_talkback(data):
+    """Protect's talkback-session reply -> {'url', 'codec', 'rate'}, or None if unusable.
+
+    Only Opus to a private IPv4 is usable; go2rtc's talkback source refuses anything else.
+    """
+    if not isinstance(data, dict) or data.get('codec') != 'opus':
+        return None
+    m = _TALKBACK_URL.match(str(data.get('url') or ''))
+    rate = data.get('samplingRate')
+    if not m or rate not in TALKBACK_RATES:
+        return None
+    try:
+        ip = ipaddress.IPv4Address(m.group(1))
+    except ValueError:
+        return None
+    port = int(m.group(2))
+    if not ip.is_private or not 0 < port < 65536:
+        return None
+    return {'url': f'rtp://{ip}:{port}', 'codec': 'opus', 'rate': rate}
+
+
+def _get_talkback(host, api_key, camera_id, refresh=False):
+    """The camera's talkback target ({'url', 'codec', 'rate'}), or None.
+
+    Protect hands back the same target on every POST, so it is cached for a
+    day; ``refresh`` asks again. Failures are logged and never cached.
+    """
+    cache_key = f'{TALKBACK_CACHE_KEY_PREFIX}{camera_id}'
+    if not refresh:
+        cached = django_cache.get(cache_key)
+        if cached:
+            return cached
+    try:
+        resp = _request(
+            'post',
+            f'https://{host}{API_BASE}/cameras/{camera_id}/talkback-session',
+            headers={'X-API-KEY': api_key},
+            verify=False,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        talkback = _parse_talkback(resp.json())
+    except (requests.RequestException, ValueError) as e:
+        logger.warning("Talkback session for camera %s failed: %s", camera_id, e)
+        return None
+    if talkback is None:
+        logger.warning("Talkback session for camera %s is unusable", camera_id)
+        return None
+    django_cache.set(cache_key, talkback, TALKBACK_CACHE_TTL)
+    return talkback
+
+
+def talk_stream_name(stream_name):
+    return f'{stream_name}_talk'
+
+
+def talkback_source(talkback):
+    """go2rtc source for a talkback target (see go2rtc-nack patch 0005)."""
+    return f"talkback:{talkback['url']}?codec=opus&rate={talkback['rate']}"
+
+
+def refresh_talkback(camera_id):
+    """Ask Protect for the camera's talkback target again and update the camera cache.
+
+    Returns the cached camera dict (with fresh ``talkback``), or None if the
+    camera isn't known or can't take talkback.
+    """
+    for site in config.protect_sites():
+        cache_key = f"{CACHE_KEY_PREFIX}{site['host']}"
+        cameras = django_cache.get(cache_key) or []
+        cam = next((c for c in cameras if c.get('camera_id') == camera_id), None)
+        if cam is None:
+            continue
+        if not cam.get('has_speaker'):
+            return None
+        talkback = _get_talkback(site['host'], site['api_key'], camera_id, refresh=True)
+        if talkback is None:
+            return None
+        if talkback != cam.get('talkback'):
+            cam = dict(cam, talkback=talkback)
+            django_cache.set(cache_key, [cam if c.get('camera_id') == camera_id else c
+                                         for c in cameras], CACHE_TTL)
+        return cam
+    return None
+
+
 def _detections(camera, is_doorbell):
     """What a camera can detect (``supported``) and has turned on in Protect (``enabled``), as our kinds.
 
@@ -374,6 +468,7 @@ def _fetch_cameras_from_site_ex(host, api_key, site_name=None):
         # Build basic camera info (no RTSPS yet)
         pending = []
         detections = {}
+        audio = {}
         for camera in cameras_data:
             name = camera.get('name', 'Unknown')
             camera_id = camera.get('id')
@@ -388,6 +483,11 @@ def _fetch_cameras_from_site_ex(host, api_key, site_name=None):
             pending.append((camera_id, name, stream_name, camera.get('type', '')))
             detections[camera_id] = _detections(
                 camera, 'doorbell' in (camera.get('type') or '').lower())
+            flags = camera.get('featureFlags') or {}
+            audio[camera_id] = {
+                'has_mic': bool(flags.get('hasMic')) and camera.get('isMicEnabled') is not False,
+                'has_speaker': bool(flags.get('hasSpeaker')),
+            }
 
         # Fetch RTSPS URLs and probe PTZ in a single parallel pass
         cameras = []
@@ -403,6 +503,10 @@ def _fetch_cameras_from_site_ex(host, api_key, site_name=None):
             ptz_futures = {
                 pool.submit(_is_ptz_camera, host, api_key, cid, ctype): cid
                 for cid, name, sn, ctype in pending
+            }
+            talk_futures = {
+                pool.submit(_get_talkback, host, api_key, cid): cid
+                for cid, _, _, _ in pending if audio[cid]['has_speaker']
             }
 
             # Collect RTSPS results
@@ -422,6 +526,8 @@ def _fetch_cameras_from_site_ex(host, api_key, site_name=None):
                         'ptz_presets': 0,
                         'is_doorbell': 'doorbell' in types.get(camera_id, '').lower(),
                         'detections': detections[camera_id],
+                        **audio[camera_id],
+                        'talkback': None,
                     }
                 else:
                     complete = False
@@ -435,6 +541,12 @@ def _fetch_cameras_from_site_ex(host, api_key, site_name=None):
                 if camera_id in rtsps_results and is_ptz:
                     rtsps_results[camera_id]['is_ptz'] = True
                     rtsps_results[camera_id]['ptz_presets'] = PTZ_DEFAULT_PRESETS
+
+            # A camera without talkback is still a camera; don't shorten the cache for it.
+            for f in as_completed(talk_futures):
+                camera_id = talk_futures[f]
+                if camera_id in rtsps_results:
+                    rtsps_results[camera_id]['talkback'] = f.result()
 
             cameras = list(rtsps_results.values())
 
