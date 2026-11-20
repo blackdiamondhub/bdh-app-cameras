@@ -2406,8 +2406,14 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
             lambda d: d.find_element(By.CSS_SELECTOR, '.cam-card.can-talk'))
         self.assertFalse(self._shown(card, '.cam-hangup'), 'no Hang up before talking')
 
-        def hub_heard():
+        def hub_heard(last):
+            # postMessage is async: wait until the parent has heard `last`.
             self.driver.switch_to.default_content()
+            try:
+                WebDriverWait(self.driver, 3).until(
+                    lambda d: d.execute_script("return __alert[__alert.length-1]") == last)
+            except Exception:
+                pass
             got = self.driver.execute_script("return __alert.splice(0)")
             self.driver.switch_to.frame(frame)
             return got
@@ -2416,17 +2422,17 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
         talk.click()
         WebDriverWait(self.driver, 3).until(lambda d: card.get_attribute('data-talk'))
         self.assertTrue(self._shown(card, '.cam-hangup'))
-        self.assertEqual(set(hub_heard()), {'hold'})
+        self.assertEqual(set(hub_heard('hold')), {'hold'})
         talk.click()  # mute
         WebDriverWait(self.driver, 3).until(lambda d: not card.get_attribute('data-talk'))
-        self.assertEqual(hub_heard()[-1:], ['release'])
+        self.assertEqual(hub_heard('release')[-1:], ['release'])
 
         talk.click()
         WebDriverWait(self.driver, 3).until(lambda d: card.get_attribute('data-talk'))
         card.find_element(By.CSS_SELECTOR, '.cam-hangup').click()
         self.assertIsNone(card.get_attribute('data-talk'))
         self.assertEqual(self.driver.execute_script("return window.__talkCalls")[-1][0], 'stop')
-        self.assertEqual(hub_heard()[-1:], ['hangup'])
+        self.assertEqual(hub_heard('hangup')[-1:], ['hangup'])
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
 
