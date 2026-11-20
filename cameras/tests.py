@@ -2383,6 +2383,57 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
         time.sleep(0.2)
         self.assertEqual(card.get_attribute('data-talk'), 'talking')
 
+    def test_popup_holds_the_hub_alert_while_talking_and_hangs_up(self):
+        """The hub closes the alert when its countdown ends; the pop-up must
+        hold it open while the mic is on, release it on mute, and Hang up must
+        stop the mic and ask the hub to close it."""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        self._patch_talk_cams()
+        self.driver.get(f'{self.live_server_url}/cameras/nope/')
+        self.driver.execute_script("""
+            window.__alert = [];
+            addEventListener('message', e => { if (e.data && e.data.bdhAlert) __alert.push(e.data.bdhAlert); });
+            document.body.innerHTML = '<iframe style="width:1100px;height:620px" '
+                + 'src="/cameras/popup/door1/"></iframe>';
+        """)
+        frame = WebDriverWait(self.driver, 10).until(
+            lambda d: d.find_element(By.TAG_NAME, 'iframe'))
+        self.driver.switch_to.frame(frame)
+        self.addCleanup(self.driver.switch_to.default_content)
+        card = WebDriverWait(self.driver, 10).until(
+            lambda d: d.find_element(By.CSS_SELECTOR, '.cam-card.can-talk'))
+        self.assertFalse(self._shown(card, '.cam-hangup'), 'no Hang up before talking')
+
+        def hub_heard(last):
+            # postMessage is async: wait until the parent has heard `last`.
+            self.driver.switch_to.default_content()
+            try:
+                WebDriverWait(self.driver, 3).until(
+                    lambda d: d.execute_script("return __alert[__alert.length-1]") == last)
+            except Exception:
+                pass
+            got = self.driver.execute_script("return __alert.splice(0)")
+            self.driver.switch_to.frame(frame)
+            return got
+
+        talk = card.find_element(By.CSS_SELECTOR, '.cam-talk')
+        talk.click()
+        WebDriverWait(self.driver, 3).until(lambda d: card.get_attribute('data-talk'))
+        self.assertTrue(self._shown(card, '.cam-hangup'))
+        self.assertEqual(set(hub_heard('hold')), {'hold'})
+        talk.click()  # mute
+        WebDriverWait(self.driver, 3).until(lambda d: not card.get_attribute('data-talk'))
+        self.assertEqual(hub_heard('release')[-1:], ['release'])
+
+        talk.click()
+        WebDriverWait(self.driver, 3).until(lambda d: card.get_attribute('data-talk'))
+        card.find_element(By.CSS_SELECTOR, '.cam-hangup').click()
+        self.assertIsNone(card.get_attribute('data-talk'))
+        self.assertEqual(self.driver.execute_script("return window.__talkCalls")[-1][0], 'stop')
+        self.assertEqual(hub_heard('hangup')[-1:], ['hangup'])
+
     def test_popup_without_kiosk_has_sound_but_no_talk(self):
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
