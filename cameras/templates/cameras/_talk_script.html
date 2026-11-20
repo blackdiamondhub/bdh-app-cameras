@@ -1,0 +1,109 @@
+{% comment %}
+Talk session logic shared by the camera view and the pop-up. Include inside a
+<script>. The page defines TALK_URL, bridge (window.BDHDisplay) and
+talkUnmute(card). Each .cam-card has data-camera-id and a .cam-talk button.
+{% endcomment %}
+    const talk = {card: null, id: null, seq: 0, started: 0, timer: 0};
+    function setTalkState(card, s) {
+        if (s) card.dataset.talk = s;
+        else delete card.dataset.talk;
+    }
+    function talkToast(card, msg) {
+        const t = card.querySelector('.cam-talk-toast');
+        if (!t) return;
+        t.textContent = msg;
+        t.classList.add('show');
+        clearTimeout(t._tid);
+        t._tid = setTimeout(() => t.classList.remove('show'), 4000);
+    }
+    function renderTalkTimer() {
+        const card = talk.card;
+        if (!card) return;
+        const s = Math.floor((Date.now() - talk.started) / 1000);
+        card.querySelector('.talk-timer').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    }
+    function endTalk() {
+        const card = talk.card;
+        talk.card = null;
+        talk.id = null;
+        talk.seq++;
+        clearInterval(talk.timer);
+        if (card) setTalkState(card, null);
+        return card;
+    }
+    function stopTalk() {
+        if (!talk.card) return;
+        endTalk();
+        try { bridge.talkStop(); } catch (e) {}
+    }
+    function talkFailed(card, detail) {
+        console.warn('talkback failed:', detail);
+        stopTalk();
+        talkToast(card, "Can't access the microphone");
+    }
+    async function startTalk(card) {
+        const seq = ++talk.seq;
+        talk.card = card;
+        talk.id = null;
+        setTalkState(card, 'connecting');
+        card.querySelector('.cam-talk-toast')?.classList.remove('show');
+        talkUnmute(card);
+        try {
+            const r = await fetch(`${TALK_URL}?camera=${encodeURIComponent(card.dataset.cameraId)}`, {
+                method: 'POST',
+                headers: {'X-CSRFToken': '{{ csrf_token }}'},
+            });
+            if (!r.ok) throw new Error(`prepare HTTP ${r.status}`);
+            const {stream, port} = await r.json();
+            if (seq !== talk.seq) return;
+            talk.id = bridge.talkStart(stream, port) ?? null;
+        } catch (err) {
+            if (seq === talk.seq) talkFailed(card, String(err));
+        }
+    }
+    // Native side reports progress here; `id` (from talkStart) lets a late
+    // callback from an earlier session be ignored.
+    window.bdhTalk = {
+        state(s, detail, id) {
+            const card = talk.card;
+            if (!card || (id != null && talk.id != null && String(id) !== String(talk.id))) return;
+            if (s === 'talking') {
+                setTalkState(card, 'talking');
+                talk.started = Date.now();
+                clearInterval(talk.timer);
+                renderTalkTimer();
+                talk.timer = setInterval(renderTalkTimer, 500);
+            } else if (s === 'error') {
+                talkFailed(card, detail);
+            } else if (s === 'stopped') {
+                endTalk();
+            }
+        },
+        level(dbfs) {
+            const card = talk.card;
+            if (!card) return;
+            const v = Math.max(0, Math.min(1, (Number(dbfs) + 60) / 60)) * 5;
+            card.querySelectorAll('.talk-bars span').forEach((b, i) => {
+                b.style.transform = `scaleY(${.15 + .85 * Math.max(0, Math.min(1, v - i))})`;
+            });
+        },
+    };
+    document.querySelectorAll('.cam-talk').forEach(btn => btn.addEventListener('click', e => {
+        e.stopPropagation();
+        const card = btn.closest('.cam-card');
+        const mine = talk.card === card;
+        stopTalk();
+        if (!mine) startTalk(card);
+    }));
+
+    // The kiosk calls window.bdhTalk in its top frame and posts the same call
+    // into every nested frame, so a page shown in the hub shell or an alert
+    // iframe hears it this way. The top page already got the direct call.
+    window.addEventListener('message', e => {
+        const m = e.data && e.data.bdhTalk;
+        if (!m || window === window.top || e.source !== window.top) return;
+        const fn = window.bdhTalk[m.fn];
+        if (typeof fn === 'function') fn.apply(null, Array.isArray(m.args) ? m.args : []);
+    });
+    document.addEventListener('visibilitychange', () => { if (document.hidden) stopTalk(); });
+    window.addEventListener('pagehide', stopTalk);

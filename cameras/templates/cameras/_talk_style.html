@@ -1,0 +1,51 @@
+{% comment %}
+Talk (camera speaker) controls, shared by the fullscreen camera view and the
+pop-up. Include inside a <style>. The root element is `.cam-card`; it gets
+`.can-talk` when the kiosk mic bridge is present and `data-talk` =
+connecting|talking while a session runs. Only transform/opacity animate:
+the display's GPU stalls video on repaint animations.
+{% endcomment %}
+    .cam-talk, .cam-talk-pill, .cam-talk-toast { display: none; }
+    .cam-card.can-talk .cam-talk {
+        display: flex; position: absolute; z-index: 5; left: 50%; bottom: 24px; transform: translateX(-50%);
+        width: 128px; height: 128px; border-radius: 50%; align-items: center; justify-content: center;
+        font-size: 46px; color: #fff; background: rgba(20,28,44,.82); border: 2px solid rgba(255,255,255,.35);
+        cursor: pointer; transition: bottom .2s, background-color .15s; padding: 0;
+    }
+    .cam-talk svg { width: 50px; height: 50px; fill: currentColor; }
+    .cam-talk::after {
+        content: ""; position: absolute; inset: -4px; border-radius: 50%; pointer-events: none;
+        border: 4px solid #5ba4e6; opacity: 0;
+    }
+    .cam-card[data-talk="connecting"] .cam-talk { background: rgba(40,74,120,.92); border-color: #9cc9f2; }
+    .cam-card[data-talk="connecting"] .cam-talk::after { animation: cam-talk-pulse 1.1s ease-out infinite; }
+    .cam-card[data-talk="talking"] .cam-talk {
+        background: #e8243a; border: 3px solid #ffd0d5;
+        box-shadow: 0 0 0 10px rgba(255,77,94,.3), 0 0 0 22px rgba(255,77,94,.14);
+    }
+    @keyframes cam-talk-pulse {
+        from { transform: scale(1); opacity: .9; }
+        to { transform: scale(1.45); opacity: 0; }
+    }
+    .cam-talk-ring { display: none; }
+    .cam-card[data-talk="talking"] .cam-talk-ring {
+        display: block; position: absolute; inset: 0; z-index: 4; border: 4px solid #ff4d5e; pointer-events: none;
+    }
+    .cam-card[data-talk="connecting"] .cam-talk-pill,
+    .cam-card[data-talk="talking"] .cam-talk-pill {
+        display: flex; position: absolute; z-index: 5; left: 50%; top: 22px; transform: translateX(-50%);
+        gap: 12px; align-items: center; padding: 9px 18px; border-radius: 999px;
+        background: rgba(232,36,58,.94); color: #fff; font-size: 16px; font-weight: 600; pointer-events: none;
+    }
+    .cam-card[data-talk="connecting"] .cam-talk-pill { background: rgba(40,64,100,.92); }
+    .cam-card[data-talk="connecting"] .talk-bars,
+    .cam-card[data-talk="connecting"] .talk-timer { display: none; }
+    .talk-bars { display: flex; gap: 3px; align-items: flex-end; height: 20px; }
+    .talk-bars span { width: 4px; height: 20px; background: #fff; border-radius: 2px;
+        transform-origin: bottom; transform: scaleY(.15); transition: transform .1s; }
+    .talk-timer { font-variant-numeric: tabular-nums; font-weight: 400; opacity: .9; }
+    .cam-talk-toast.show {
+        display: block; position: absolute; z-index: 6; left: 50%; bottom: 168px; transform: translateX(-50%);
+        padding: 14px 18px; border-radius: 14px; font-size: 16px; color: #fff; white-space: nowrap;
+        background: rgba(18,24,38,.95); border: 1px solid #ff8a95; pointer-events: none;
+    }
