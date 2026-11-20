@@ -425,9 +425,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
     }
 
     /* ---- Admin: full-screen time scrubber ---- */
-    /* Must out-rank `.cam-card video { display: block }`: an empty replay <video> left on top of
-   the live stream shows Android WebView's play-button placeholder. */
-.cam-card .cam-scrub, .cam-card .cam-replay, .cam-card .cam-still { display: none; }
+    .cam-scrub, .cam-replay, .cam-still { display: none; }
     .cam-card:fullscreen .cam-scrub { display: flex; }
     .cam-card:fullscreen .cam-label { bottom: 150px; }
     .cam-card:fullscreen .ptz-controls { bottom: 150px; }
