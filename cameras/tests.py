@@ -3230,18 +3230,20 @@ class PopupSettingsViewTests(TestCase):
              "attributes": {"friendly_name": "Front Door Battery"}},
             {"entity_id": "sensor.temp", "state": "20", "attributes": {}},
         ]
-        registries = [
-            [{"entity_id": "binary_sensor.front_door", "device_id": "d1", "area_id": None},
-             {"entity_id": "binary_sensor.front_door_motion", "device_id": "d1", "area_id": "porch"},
-             {"entity_id": "sensor.front_door_battery", "device_id": "d1", "entity_category": "diagnostic"},
-             {"entity_id": "sensor.temp", "device_id": "gone", "area_id": "kitchen", "hidden_by": "user"}],
-            [{"area_id": "hall", "name": "Hall"}, {"area_id": "kitchen", "name": "Kitchen"},
-             {"area_id": "porch", "name": "Porch"}],
-            [{"id": "d1", "area_id": "hall", "name": "Front door", "name_by_user": None, "manufacturer": "Ring"},
-             {"id": "unused", "name": "Unused"}, {"id": "gone", "name": "Gone", "disabled_by": "user"}],
-        ]
+        registry = {
+            "entities": [
+                {"entity_id": "binary_sensor.front_door", "device_id": "d1", "area_id": None},
+                {"entity_id": "binary_sensor.front_door_motion", "device_id": "d1", "area_id": "porch"},
+                {"entity_id": "sensor.front_door_battery", "device_id": "d1", "entity_category": "diagnostic"},
+                {"entity_id": "sensor.temp", "device_id": "gone", "area_id": "kitchen", "hidden_by": "user"}],
+            "areas": [{"area_id": "hall", "name": "Hall"}, {"area_id": "kitchen", "name": "Kitchen"},
+                      {"area_id": "porch", "name": "Porch"}],
+            "devices": [
+                {"id": "d1", "area_id": "hall", "name": "Front door", "name_by_user": None, "manufacturer": "Ring"},
+                {"id": "unused", "name": "Unused"}, {"id": "gone", "name": "Gone", "disabled_by": "user"}],
+        }
         with patch("bdh_sdk.ha.get_all_states", return_value=states), \
-                patch("bdh_sdk.ha.ws_commands", return_value=registries):
+                patch("bdh_sdk.ha.get_registry", return_value=registry):
             data = self.client.get("/cameras/settings/popups/entities/").json()
         door = {"domain": "binary_sensor", "device": "d1", "category": "", "useful": True, "suggest": True,
                 "instance": "ha"}
@@ -3274,13 +3276,14 @@ class PopupSettingsViewTests(TestCase):
             return [{"entity_id": "lock.gate", "state": "locked",
                      "attributes": {"friendly_name": (instance or "home") + " gate"}}]
 
-        def ws(*cmds, instance=None):
-            return [[{"entity_id": "lock.gate", "device_id": "g"}], [],
-                    [{"id": "g", "name": "Gate " + (instance or "home")}]]
+        def registry(instance=None):
+            # An older hub: no "areas".
+            return {"entities": [{"entity_id": "lock.gate", "device_id": "g"}],
+                    "devices": [{"id": "g", "name": "Gate " + (instance or "home")}]}
 
         with patch("bdh_sdk.ha.instances", return_value=insts), \
                 patch("bdh_sdk.ha.get_all_states", side_effect=states) as gs, \
-                patch("bdh_sdk.ha.ws_commands", side_effect=ws), \
+                patch("bdh_sdk.ha.get_registry", side_effect=registry), \
                 self.assertLogs("cameras.views", "WARNING"):
             data = self.client.get("/cameras/settings/popups/entities/").json()
         # The default instance is asked without ``instance`` (older hubs).
@@ -3575,17 +3578,35 @@ class BrokerTests(TestCase):
         with patch.dict("os.environ", {"BDH_GO2RTC_URL": "http://127.0.0.1:11903"}):
             self.assertEqual(config.go2rtc_url(), "http://127.0.0.1:11903")
 
-    def test_entity_picker_without_registry_grant(self):
-        self.broker.on("ha.get_all_states", lambda payload: [
-            {"entity_id": "binary_sensor.front_door", "state": "off",
-             "attributes": {"friendly_name": "Front Door", "device_class": "door"}}])
-        with patch("cameras.views.is_admin", return_value=True), \
-                self.assertLogs("cameras.views", "WARNING"):
-            resp = self.client.get("/cameras/settings/popups/entities/")
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual([e["id"] for e in resp.json()["entities"]], ["binary_sensor.front_door"])
-        # Registries need the admin-only ha.ws grant: asked, denied, ignored.
-        self.assertEqual(len(self.broker.ops("ha.ws_commands")), 1)
+    def test_entity_picker_groups_devices_with_manifest_grants(self):
+        """With only the manifest's permissions (as on a real hub), both instances' entities
+        come back grouped under their devices and areas."""
+        from bdh_sdk.testing import FakeBroker
+        from .plugin import spec
+
+        self.broker.stop()
+        broker = FakeBroker.for_plugin(spec, install=True)
+        broker.start()
+        self.addCleanup(broker.stop)
+        broker.instances = [{"id": "ha", "name": "Home", "site": "Mercer Island", "default": True},
+                            {"id": "ha_bdl", "name": "Lodge", "site": "Sun Peaks", "default": False}]
+        for inst, label in (("ha", "Front"), ("ha_bdl", "Lodge")):
+            broker.ha_states[inst] = [
+                {"entity_id": "binary_sensor.door", "state": "off",
+                 "attributes": {"friendly_name": f"{label} Door", "device_class": "door"}}]
+            broker.registries[inst] = {
+                "entities": [{"entity_id": "binary_sensor.door", "device_id": "d"}],
+                "devices": [{"id": "d", "name": f"{label}", "manufacturer": "Ring", "area_id": "porch"}],
+                "areas": [{"area_id": "porch", "name": f"{label} Porch"}],
+            }
+        with patch("cameras.views.is_admin", return_value=True):
+            data = self.client.get("/cameras/settings/popups/entities/").json()
+        self.assertEqual([(d["instance"], d["name"], d["area"]) for d in data["devices"]],
+                         [("ha", "Front", "Front Porch"), ("ha_bdl", "Lodge", "Lodge Porch")])
+        self.assertEqual([(e["instance"], e["device"], e["short"], e["area"]) for e in data["entities"]],
+                         [("ha", "d", "Door", "Front Porch"), ("ha_bdl", "d", "Door", "Lodge Porch")])
+        # Never the admin-only raw websocket op.
+        self.assertEqual(broker.ops("ha.ws_commands"), [])
 
     def test_trigger_subscribes_and_pushes_alert(self):
         from bdh_sdk import events, rpc
