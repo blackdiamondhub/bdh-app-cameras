@@ -95,9 +95,29 @@ def _remember_streams(go2rtc_url, cameras):
             wanted[f"{camera['stream_name']}_low"] = low_url
         if camera.get('talkback'):
             wanted[talk_stream_name(camera['stream_name'])] = talkback_source(camera['talkback'])
+        if listen_stream_name(camera) != camera['stream_name']:
+            # Video from Protect, sound from the echo canceller (which reads
+            # the mic from the _low stream and the talk it proxies).
+            wanted[listen_stream_name(camera)] = (
+                f"{camera['rtsp_url']}#media=video",
+                f"{config.aec_url()}/aec.ts?cam={urllib.parse.quote(camera['stream_name'], safe='')}",
+            )
     with _keeper_lock:
         _wanted.setdefault(go2rtc_url, {}).update(wanted)
     return wanted
+
+
+def listen_stream_name(camera):
+    """The stream to watch and hear a camera on full screen.
+
+    Two-way cameras go through the echo canceller when it's set up, so you
+    don't hear yourself back from the doorbell.
+    """
+    name = camera['stream_name']
+    if (config.aec_url() and camera.get('talkback') and camera.get('has_mic')
+            and camera.get('rtsp_url_low')):
+        return f"{name}_aec"
+    return name
 
 
 def _seed_from_protect():
@@ -331,6 +351,7 @@ def camera_feed_view(request):
                     'has_speaker': cam.get('has_speaker', False),
                     'talk_stream': (talk_stream_name(cam['stream_name'])
                                     if cam.get('talkback') else ''),
+                    'hi_stream': listen_stream_name(cam),
                 }
                 for cam in all_cameras
             ]
@@ -542,7 +563,7 @@ def popup(request, camera_id):
     from urllib.parse import urlparse
     return render(request, 'cameras/popup.html', {
         'camera_id': camera_id,
-        'stream': camera['stream_name'],
+        'stream': listen_stream_name(camera),
         'name': camera['name'],
         'has_mic': camera.get('has_mic', False),
         'talk_stream': (talk_stream_name(camera['stream_name'])
@@ -575,7 +596,9 @@ def talk_prepare(request):
     with _keeper_lock:
         _wanted.setdefault(go2rtc_url, {})[name] = source
     _sync_streams(go2rtc_url, {name: source})
-    return JsonResponse({'stream': name, 'port': urllib.parse.urlparse(go2rtc_url).port or 1984})
+    # With echo cancelling, talk goes through the sidecar (same /api/talk).
+    port_of = config.aec_url() or go2rtc_url
+    return JsonResponse({'stream': name, 'port': urllib.parse.urlparse(port_of).port or 1984})
 
 
 @require_POST
@@ -765,6 +788,11 @@ def main_settings(request):
             changes["keep_open"] = raw["keep_open"]
         if raw.get("video_transport") in ("tcp", "udp"):
             changes["video_transport"] = raw["video_transport"]
+        if isinstance(raw.get("aec_url"), str):
+            aec = raw["aec_url"].strip().rstrip("/")
+            if not config.valid_aec_url(aec):
+                return JsonResponse({"error": "echo cancellation URL must look like http://host:port"}, status=400)
+            changes["aec_url"] = aec
         if not changes:
             return JsonResponse({"error": "nothing to save"}, status=400)
         config.save_settings(**changes)
@@ -809,6 +837,7 @@ def main_settings(request):
             "popups": {"enabled": pcfg["enabled"], "cameras": len(pcfg["cameras"]),
                        "seconds": config.popup_seconds()},
             "keep_open": config.keep_open(), "video_transport": config.video_transport(),
+            "aec_url": config.aec_url(),
             "save_url": request.path,
             "nvrs_url": reverse("cameras_nvrs"), "popups_url": reverse("cameras_popups"),
         },

@@ -575,6 +575,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
             {% endif %}
         <video-stream
             data-stream-name="{{ stream.name }}"
+            data-hi-stream="{{ stream.hi_stream|default:stream.name }}"
             data-has-low="{% if stream.has_low %}true{% else %}false{% endif %}"
             data-mode="{{ video_mode }}"
             data-fallback-mode="mse"
@@ -1335,7 +1336,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
             card.classList.remove('hi-live');
             startStream(low, lowSrc(low));
         }
-        if (low.dataset.hasLow === 'true') startStream(hiStream(card), low.dataset.streamName);
+        if (low.dataset.hasLow === 'true') startStream(hiStream(card), low.dataset.hiStream || low.dataset.streamName);
     }
 
     // High-res is playing: show it and drop the low-res stream underneath.
