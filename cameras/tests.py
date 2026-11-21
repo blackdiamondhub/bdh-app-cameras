@@ -1635,6 +1635,42 @@ class TalkPrepareViewTests(TestCase):
         self.client.force_login(user)
         self.assertEqual(self.client.post(self.URL + '?camera=cabin').status_code, 200)
 
+    @patch('cameras.views.config.aec_url', return_value='http://h:11911')
+    @patch('cameras.views.refresh_talkback')
+    def test_talk_goes_through_echo_canceller(self, mock_refresh, mock_aec):
+        mock_refresh.side_effect = self._camera
+        response = self.client.post(self.URL + '?camera=door')
+        self.assertEqual(response.json(), {'stream': 'front_door_talk', 'port': 11911})
+
+
+class EchoCancelStreamTests(SimpleTestCase):
+    """With the bdh-aec sidecar set, two-way cameras are heard through <stream>_aec."""
+    CAM = {'stream_name': 'front_door', 'rtsp_url': 'rtsps://nvr/hi', 'rtsp_url_low': 'rtsps://nvr/lo',
+           'has_mic': True, 'has_speaker': True,
+           'talkback': {'url': 'rtp://10.0.0.5:7004', 'codec': 'opus', 'rate': 24000}}
+
+    def setUp(self):
+        from . import views
+        self.views = views
+        views._wanted.clear()
+        self.addCleanup(views._wanted.clear)
+
+    def test_off_by_default(self):
+        with patch('cameras.views.config.aec_url', return_value=''):
+            wanted = self.views._remember_streams('http://g', [self.CAM])
+            self.assertEqual(self.views.listen_stream_name(self.CAM), 'front_door')
+        self.assertNotIn('front_door_aec', wanted)
+
+    def test_two_way_cameras_get_an_aec_stream(self):
+        mic_only = dict(self.CAM, stream_name='yard', talkback=None)
+        with patch('cameras.views.config.aec_url', return_value='http://h:11911'):
+            wanted = self.views._remember_streams('http://g', [self.CAM, mic_only])
+            self.assertEqual(self.views.listen_stream_name(self.CAM), 'front_door_aec')
+            self.assertEqual(self.views.listen_stream_name(mic_only), 'yard')
+        self.assertEqual(wanted['front_door_aec'],
+                         ('rtsps://nvr/hi#media=video', 'http://h:11911/aec.ts?cam=front_door'))
+        self.assertNotIn('yard_aec', wanted)
+
 
 class RtcDiagViewTests(TestCase):
     """The WebRTC-fallback diagnostics endpoint logs what the browser saw."""
@@ -3910,6 +3946,16 @@ class MainSettingsViewTests(TestCase):
         self.assertEqual(self.client.post(self.URL, "{nope", content_type="application/json").status_code, 400)
         self.assertEqual(self.post({"video_transport": "carrier-pigeon", "keep_open": "yes"}).status_code, 400)
         self.assertEqual(_config_mod.settings(), {})
+
+    def test_echo_cancellation_url(self):
+        self.assertEqual(self.post({"aec_url": "http://192.168.1.179:11911/"}).status_code, 200)
+        self.assertEqual((_config_mod.aec_url(), self.page()["aec_url"]),
+                         ("http://192.168.1.179:11911",) * 2)
+        for junk in ("ws://h:1", "http://h", "javascript:alert(1)//:1"):
+            with self.subTest(junk=junk):
+                self.assertEqual(self.post({"aec_url": junk}).status_code, 400)
+        self.assertEqual(self.post({"aec_url": ""}).status_code, 200)
+        self.assertEqual(_config_mod.aec_url(), "")
 
 
 # --- In the app container: everything goes through the hub broker ---
