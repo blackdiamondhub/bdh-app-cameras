@@ -788,11 +788,6 @@ def main_settings(request):
             changes["keep_open"] = raw["keep_open"]
         if raw.get("video_transport") in ("tcp", "udp"):
             changes["video_transport"] = raw["video_transport"]
-        if isinstance(raw.get("aec_url"), str):
-            aec = raw["aec_url"].strip().rstrip("/")
-            if not config.valid_aec_url(aec):
-                return JsonResponse({"error": "echo cancellation URL must look like http://host:port"}, status=400)
-            changes["aec_url"] = aec
         if not changes:
             return JsonResponse({"error": "nothing to save"}, status=400)
         config.save_settings(**changes)
@@ -837,7 +832,6 @@ def main_settings(request):
             "popups": {"enabled": pcfg["enabled"], "cameras": len(pcfg["cameras"]),
                        "seconds": config.popup_seconds()},
             "keep_open": config.keep_open(), "video_transport": config.video_transport(),
-            "aec_url": config.aec_url(),
             "save_url": request.path,
             "nvrs_url": reverse("cameras_nvrs"), "popups_url": reverse("cameras_popups"),
         },

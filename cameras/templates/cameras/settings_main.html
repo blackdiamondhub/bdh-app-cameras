@@ -102,12 +102,6 @@
                 </select>
             </div>
         </div>
-        <div class="hst-row">
-            <div class="lbl"><b>Echo cancellation (beta)</b><small>URL of the bdh-aec server on this hub, e.g. http://192.168.1.179:11911. Talking to a doorbell goes through it so you don't hear yourself back. Leave empty to turn it off.</small></div>
-            <div class="ctl">
-                <input class="hst-in" id="cs-aec" type="url" placeholder="Off" aria-label="Echo cancellation server" value="{{ p.aec_url }}">
-            </div>
-        </div>
     </div>
 </div>
 {% endwith %}
@@ -168,8 +162,6 @@
     keep.addEventListener('change', () => save({keep_open: keep.checked}));
     const transport = document.getElementById('cs-transport');
     transport.addEventListener('change', () => save({video_transport: transport.value}));
-    const aec = document.getElementById('cs-aec');
-    aec.addEventListener('change', () => save({aec_url: aec.value.trim()}));
 })();
 </script>
 {% endblock %}

@@ -3947,15 +3947,15 @@ class MainSettingsViewTests(TestCase):
         self.assertEqual(self.post({"video_transport": "carrier-pigeon", "keep_open": "yes"}).status_code, 400)
         self.assertEqual(_config_mod.settings(), {})
 
-    def test_echo_cancellation_url(self):
-        self.assertEqual(self.post({"aec_url": "http://192.168.1.179:11911/"}).status_code, 200)
-        self.assertEqual((_config_mod.aec_url(), self.page()["aec_url"]),
-                         ("http://192.168.1.179:11911",) * 2)
-        for junk in ("ws://h:1", "http://h", "javascript:alert(1)//:1"):
-            with self.subTest(junk=junk):
-                self.assertEqual(self.post({"aec_url": junk}).status_code, 400)
-        self.assertEqual(self.post({"aec_url": ""}).status_code, 200)
-        self.assertEqual(_config_mod.aec_url(), "")
+    def test_echo_cancellation_comes_from_the_companion(self):
+        """The aec URL is the supervisor's companion, not a setting."""
+        self.assertEqual(self.post({"aec_url": "http://evil:1"}).status_code, 400)
+        self.assertNotIn("aec_url", self.page())
+        with patch.dict(os.environ, {"BDH_AEC_URL": "http://127.0.0.1:12200/"}):
+            self.assertEqual(_config_mod.aec_url(), "http://127.0.0.1:12200")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("BDH_AEC_URL", None)
+            self.assertEqual(_config_mod.aec_url(), "")
 
 
 # --- In the app container: everything goes through the hub broker ---
