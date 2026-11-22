@@ -1,6 +1,5 @@
 """Camera app settings: the go2rtc server and the UniFi Protect sites."""
 import os
-import re
 import threading
 import time
 
@@ -182,22 +181,14 @@ def video_mode():
     return "webrtc" if video_transport() == "udp" else "webrtc/tcp"
 
 
-_AEC_URL_RE = re.compile(r"^https?://[A-Za-z0-9.\-\[\]:]+:\d{1,5}$")
-
-
-def valid_aec_url(value):
-    return value == "" or bool(_AEC_URL_RE.match(value))
-
-
 def aec_url():
-    """The echo-cancellation sidecar (bdh-aec) base URL, or "" when it's off.
+    """The echo-cancellation companion's (bdh-aec) base URL, or "" without one.
 
-    When set, talk goes through the sidecar (it keeps what's said as the echo
+    The supervisor runs it beside go2rtc and passes ``BDH_AEC_URL``. With it,
+    talk goes through the companion (it keeps what's said as the echo
     reference) and two-way cameras are heard through ``<stream>_aec``.
     """
-    value = settings().get("aec_url")
-    return value.rstrip("/") if isinstance(value, str) and valid_aec_url(value.rstrip("/")) else ""
-
+    return os.environ.get("BDH_AEC_URL", "").rstrip("/")
 
 POPUP_SECONDS_MIN, POPUP_SECONDS_MAX = 10, 600
 
