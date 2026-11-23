@@ -50,8 +50,9 @@ detections, using the private Protect API via [uiprotect](https://github.com/uil
 The detections are Doorbell, Person, Vehicle, Package and Animal, plus plain Motion if you turn
 it on. Choose which ones show up in the app's Settings.
 
-- Signed-in staff get a "Last 24 hours" rail, plus a time scrubber on a full-screen camera
-  for snapshots and replay. Guests only see live video.
+- Admins get a "Last 24 hours" rail, plus a time scrubber on a full-screen camera for
+  snapshots and replay, with everything recorded. Guests get them only if the Guests settings
+  page allows it, and only from its window on (see [Guests](#guests)).
 - A pop-up is a hub alert that embeds `/cameras/popup/<camera_id>/`, a live-only page. Choose
   what pops up each camera on the Pop-ups settings page (below); set how long it stays open in
   Settings.
@@ -73,11 +74,30 @@ Admins choose what pops up each camera on **Settings â†’ Pop-ups** (`/camer
   Person: Notify, other detections: Single ding, triggers: Knock-knock), or pick another chime or
   Silent; ▶ previews it. Pop-ups are silent in Night mode and the volume is under Settings → Display
   (needs a hub with chimes, BlackDiamondHub #258).
+- **Who sees it:** Everyone, or Only when signed in (the hub shows it only on screens with an
+  admin signed in). Cameras hidden from guests are always Only when signed in.
 
 A master switch turns all pop-ups off. Changes apply at once. A pop-up shares one alert per camera,
 so another trigger while it is showing just restarts its timer (`popup_seconds`) without chiming again.
 
 Until the page is first saved, a ring pops up its doorbell camera.
+
+## Guests
+
+A guest is anyone who isn't signed in as an admin (an active staff user). Admins see and do
+everything; **Settings → Guests** (`/cameras/settings/guests/`) sets what guests get:
+
+- **Cameras:** each NVR is Visible or Hidden to guests, and any camera can be set the other way.
+  NVRs added later are hidden until you choose. Until the page is first saved, guests see the
+  first NVR only.
+- **Talk** and **PTZ presets:** on or off for guests (both on by default).
+- **Events:** Off (default, live video only), Last 24 hours, or Since a date and time (the hub's
+  local time). Guests then get the events rail, snapshots and replay, for the cameras they see
+  and only from then on.
+
+The rules are enforced on the server for every page and API serving camera data (the cameras
+page, the home page tile, pop-ups, talk, PTZ, events, thumbnails, snapshots and clips): a camera
+hidden from guests is a 403/404 for them everywhere. The settings pages are admin-only.
 
 ## Screen saver
 

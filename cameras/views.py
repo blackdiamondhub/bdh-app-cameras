@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone as dt_timezone
 from functools import wraps
 
-from bdh_sdk import is_admin, push
+from bdh_sdk import push
 from bdh_sdk.rpc import BrokerError
 from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import render
@@ -20,7 +20,7 @@ from django.utils import timezone
 from django.views.decorators.clickjacking import xframe_options_sameorigin
 from django.views.decorators.http import require_GET, require_POST
 
-from . import clips, config, events, frames, popups
+from . import clips, config, events, frames, policy, popups
 from .models import ProtectEvent
 from .protect_api import (
     get_protect_cameras, ptz_goto_preset, refresh_talkback, talk_stream_name, talkback_source,
@@ -34,8 +34,10 @@ CLIP_MAX = timedelta(seconds=120)
 
 @push.authorize
 def push_topics(request):
-    """Only admins see the events rail, so only they hear its updates."""
-    return ["cameras/#"] if is_admin(request) else []
+    """Only viewers who see the events rail hear its updates."""
+    if policy.is_admin(request):
+        return ["cameras/#"]
+    return [events.CHANGED_TOPIC] if policy.can_see_events(request) else []
 
 
 def get_go2rtc_streams(go2rtc_url):
@@ -302,7 +304,7 @@ def _cached_poster(camera_id):
 def _requested_site(value, sites):
     """Index of the tab to open for ?site=, by name ("mercer_island") or index.
 
-    Unknown or hidden sites (guests only see the first) open the first tab.
+    Unknown sites (or ones with no cameras guests may see) open the first tab.
     """
     value = (value or '').strip().lower().replace(' ', '_').replace('-', '_')
     if value.isdigit():
@@ -324,14 +326,14 @@ def camera_feed_view(request):
     """
     go2rtc_url = config.go2rtc_url()
     protect_sites = config.protect_sites()
+    admin = policy.is_admin(request)
 
     if protect_sites:
         # Multi-site discovery via Protect API
         site_data = get_protect_cameras()
-
-        # Only show the first (primary) site to unauthenticated users
-        if not request.user.is_authenticated:
-            site_data = site_data[:1]
+        if not admin:
+            site_data = policy.guest_sites(site_data)
+        talk, ptz = policy.can_talk(request), policy.can_ptz(request)
 
         sites = []
         for site in site_data:
@@ -342,15 +344,15 @@ def camera_feed_view(request):
                     'name': cam['stream_name'],
                     'display_name': cam['name'],
                     'camera_id': cam.get('camera_id', ''),
-                    'is_ptz': cam.get('is_ptz', False),
-                    'ptz_presets': cam.get('ptz_presets', 0),
-                    'preset_range': list(range(cam.get('ptz_presets', 0))),
+                    'is_ptz': ptz and cam.get('is_ptz', False),
+                    'ptz_presets': cam.get('ptz_presets', 0) if ptz else 0,
+                    'preset_range': list(range(cam.get('ptz_presets', 0) if ptz else 0)),
                     'has_low': bool(cam.get('rtsp_url_low', '')),
                     'is_doorbell': cam.get('is_doorbell', False),
                     'has_mic': cam.get('has_mic', False),
                     'has_speaker': cam.get('has_speaker', False),
                     'talk_stream': (talk_stream_name(cam['stream_name'])
-                                    if cam.get('talkback') else ''),
+                                    if talk and cam.get('talkback') else ''),
                     'hi_stream': listen_stream_name(cam),
                 }
                 for cam in all_cameras
@@ -361,6 +363,10 @@ def camera_feed_view(request):
                 'streams': streams,
                 'hero': hero,
             })
+        if not sites:
+            # Nothing guests can see (or no cameras): one empty panel says so.
+            streams, hero = _with_hero([])
+            sites = [{'name': 'Cameras', 'streams': streams, 'hero': hero}]
     else:
         # Fallback: show streams already configured in go2rtc
         streams, hero = _with_hero(get_go2rtc_streams(go2rtc_url))
@@ -372,8 +378,9 @@ def camera_feed_view(request):
 
     active_site = _requested_site(request.GET.get('site'), sites)
 
-    admin = is_admin(request)
-    if admin and sites:
+    show_events = policy.can_see_events(request)
+    window = policy.event_window(request)
+    if show_events and sites:
         _inline_posters(sites[active_site]['streams'])
 
     return render(request, 'cameras/camera_feeds.html', {
@@ -382,6 +389,9 @@ def camera_feed_view(request):
         'go2rtc_url': go2rtc_url,
         'go2rtc_port': go2rtc_port,
         'is_admin': admin,
+        'show_events': show_events,
+        # Earliest moment the events rail and scrubber may reach (ms), 0 for no limit.
+        'events_from': int(window.timestamp() * 1000) if window else 0,
         'event_kinds': [(k, config.KIND_SHORT[k]) for k in config.enabled_event_kinds()],
         'kind_labels': json.dumps(config.KIND_SHORT),
         'keep_open': config.keep_open(),
@@ -389,14 +399,8 @@ def camera_feed_view(request):
     })
 
 
-def admin_only(view):
-    """Recordings and history are for signed-in staff only; guests get live view."""
-    @wraps(view)
-    def wrapped(request, *args, **kwargs):
-        if not is_admin(request):
-            return JsonResponse({'error': 'forbidden'}, status=403)
-        return view(request, *args, **kwargs)
-    return wrapped
+def _forbidden():
+    return JsonResponse({'error': 'forbidden'}, status=403)
 
 
 def _unavailable(err=None):
@@ -422,14 +426,24 @@ def _parse_ts(value):
     return datetime.fromtimestamp(num, tz=dt_timezone.utc)
 
 
-@admin_only
 @require_GET
 def events_json(request):
-    """Last 24 hours of Protect events, filtered to the enabled kinds."""
+    """Last 24 hours of Protect events, filtered to the enabled kinds.
+
+    Guests only get the cameras they see, from the Guests page's window on.
+    """
+    if not policy.can_see_events(request):
+        return _forbidden()
     enabled = config.enabled_event_kinds()
     since = timezone.now() - events.HISTORY
+    found = ProtectEvent.objects.filter(start__gte=since)
+    if not policy.is_admin(request):
+        window = policy.event_window(request)
+        if window is not None:
+            found = found.filter(start__gte=window)
+        found = found.filter(camera_id__in=policy.visible_camera_ids(sites=get_protect_cameras))
     out = []
-    for ev in ProtectEvent.objects.filter(start__gte=since).defer('thumbnail'):
+    for ev in found.defer('thumbnail'):
         kinds = [k for k in ev.kinds if k in enabled]
         if not kinds:
             continue
@@ -446,11 +460,12 @@ def events_json(request):
     return JsonResponse({'events': out, 'kinds': enabled, 'live': events.available()})
 
 
-@admin_only
 @require_GET
 def event_thumb(request, event_id):
+    if not policy.can_see_events(request):
+        return _forbidden()
     ev = ProtectEvent.objects.filter(event_id=event_id).first()
-    if ev is None:
+    if ev is None or not policy.can_see_moment(request, ev.camera_id, ev.start, get_protect_cameras):
         raise Http404
     data = bytes(ev.thumbnail) if ev.thumbnail else None
     if data is None:
@@ -472,11 +487,18 @@ def _fetch_live(key):
     return events.run(camera_id, lambda client: client.get_camera_snapshot(camera_id, width=width, dt=None))
 
 
-@admin_only
 @require_GET
 def snapshot(request, camera_id):
-    """A still from the recording at ``ts`` (or now)."""
+    """A still from the recording at ``ts`` (or now).
+
+    Guests only get these with events on (they're the rail's and scrubber's
+    stills), for cameras they see and inside their window.
+    """
     dt = _parse_ts(request.GET.get('ts'))
+    if not policy.can_see_events(request) or not policy.can_view(request, camera_id, get_protect_cameras):
+        return _forbidden()
+    if not policy.can_see_moment(request, camera_id, dt or timezone.now(), get_protect_cameras):
+        return _forbidden()
     try:
         width = min(max(int(request.GET.get('w', 960)), 160), 1920)
     except ValueError:
@@ -513,14 +535,17 @@ def snapshot(request, camera_id):
     return resp
 
 
-@admin_only
 @require_GET
 def clip(request, camera_id):
     """An MP4 export of a recording window (at most CLIP_MAX seconds)."""
+    if not policy.can_see_events(request) or not policy.can_view(request, camera_id, get_protect_cameras):
+        return _forbidden()
     start = _parse_ts(request.GET.get('start'))
     end = _parse_ts(request.GET.get('end'))
     if start is None:
         return JsonResponse({'error': 'start required'}, status=400)
+    if not policy.can_see_moment(request, camera_id, start, get_protect_cameras):
+        return _forbidden()
     if end is None or end <= start:
         end = start + CLIP_DEFAULT
     end = min(end, start + CLIP_MAX, timezone.now())
@@ -549,6 +574,8 @@ def clip(request, camera_id):
 @require_GET
 def popup(request, camera_id):
     """Chrome-less live view for the hub's doorbell pop-up (live only, no history)."""
+    if not policy.can_view(request, camera_id, get_protect_cameras):
+        raise Http404
     camera = None
     for site in get_protect_cameras():
         for cam in site.get('cameras', []):
@@ -567,8 +594,8 @@ def popup(request, camera_id):
         'name': camera['name'],
         'has_mic': camera.get('has_mic', False),
         'talk_stream': (talk_stream_name(camera['stream_name'])
-                        if camera.get('talkback') else ''),
-        # Inline only: the snapshot view is admin-only and the pop-up is public.
+                        if camera.get('talkback') and policy.can_talk(request) else ''),
+        # Inline only: guests without events can't use the snapshot view.
         'poster': _cached_poster(camera_id),
         'go2rtc_port': urlparse(config.go2rtc_url()).port or 1984,
         'video_mode': config.video_mode(),
@@ -583,10 +610,8 @@ def talk_prepare(request):
     ``{"stream": ..., "port": ...}`` for ``BDHDisplay.talkStart``.
     """
     camera_id = request.GET.get('camera', '')
-    if camera_id and not request.user.is_authenticated:
-        visible = get_protect_cameras()[:1]
-        if not any(c.get('camera_id') == camera_id for s in visible for c in s.get('cameras', [])):
-            camera_id = ''
+    if camera_id and not (policy.can_view(request, camera_id, get_protect_cameras) and policy.can_talk(request)):
+        camera_id = ''
     cam = refresh_talkback(camera_id) if camera_id else None
     if cam is None:
         return JsonResponse({'error': 'talkback unavailable'}, status=404)
@@ -619,6 +644,8 @@ def ptz_goto(request):
                 status=400,
             )
 
+        if not (policy.can_view(request, camera_id, get_protect_cameras) and policy.can_ptz(request)):
+            return JsonResponse({'success': False, 'error': 'forbidden'}, status=403)
         success = ptz_goto_preset(camera_id, int(slot))
         return JsonResponse({'success': success})
 
@@ -692,7 +719,7 @@ def _settings_admin_only(view):
     """Settings pages don't exist for anyone but admins."""
     @wraps(view)
     def wrapped(request, *args, **kwargs):
-        if not is_admin(request):
+        if not policy.is_admin(request):
             raise Http404()
         return view(request, *args, **kwargs)
     return wrapped
@@ -743,9 +770,12 @@ def popup_settings(request):
         return JsonResponse(popups.save(raw))
     sites = []
     try:
-        for site in _detection_sites():
+        guests = policy.current()
+        for i, site in enumerate(_detection_sites()):
             if site["cameras"]:
-                sites.append({"name": site["name"], "stale": site["stale"], "cameras": site["cameras"]})
+                cams = [{**c, "guest_hidden": not policy.camera_visible(guests, site, i, c["id"])}
+                        for c in site["cameras"]]
+                sites.append({"name": site["name"], "stale": site["stale"], "cameras": cams})
     except Exception:
         logger.exception("Could not list cameras for the pop-ups page")
     try:
@@ -823,6 +853,13 @@ def main_settings(request):
     except Exception:
         logger.exception("Could not read the pop-up settings")
         pcfg = popups.clean({})
+    gcfg = policy.current()
+    cams = [(i, site, c["id"]) for i, site in enumerate(sites) for c in site["cameras"]]
+    guests = {
+        "visible": sum(policy.camera_visible(gcfg, site, i, cid) for i, site, cid in cams),
+        "cameras": len(cams), "talk": gcfg["talk"], "ptz": gcfg["ptz"], "events": gcfg["events"],
+        "since": _local_since(gcfg["events_since"]).replace("T", " "),
+    }
     return render(request, "cameras/settings_main.html", {
         "active": "cameras",
         "page": {
@@ -832,9 +869,58 @@ def main_settings(request):
             "popups": {"enabled": pcfg["enabled"], "cameras": len(pcfg["cameras"]),
                        "seconds": config.popup_seconds()},
             "keep_open": config.keep_open(), "video_transport": config.video_transport(),
+            "guests": guests,
             "save_url": request.path,
             "nvrs_url": reverse("cameras_nvrs"), "popups_url": reverse("cameras_popups"),
+            "guests_url": reverse("cameras_guests"),
         },
+    })
+
+
+def _local_since(value):
+    """A stored ``events_since`` as the hub's local time for a datetime-local input."""
+    if not value:
+        return ""
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return ""
+    return timezone.localtime(dt).strftime("%Y-%m-%dT%H:%M")
+
+
+def _guest_page_config(cfg):
+    return {**cfg, "events_since": _local_since(cfg["events_since"])}
+
+
+@_settings_admin_only
+def guests_settings(request):
+    """What guests (anyone not signed in as an admin) see: cameras, talk, PTZ and events."""
+    if request.method == "POST":
+        raw = _json_body(request)
+        if raw is None:
+            return JsonResponse({"error": "bad JSON"}, status=400)
+        return JsonResponse(_guest_page_config(policy.save(raw)))
+    cfg = policy.current()
+    sites, error = [], ""
+    try:
+        for i, site in enumerate(_detection_sites()):
+            entry = cfg["nvrs"].get(str(site["id"])) if site["id"] is not None else None
+            default = entry["default"] if entry else policy.HIDDEN
+            if cfg.get(policy.FIRST_ONLY) and i == 0:
+                default = policy.VISIBLE
+            sites.append({
+                "id": site["id"], "name": site["name"], "stale": site["stale"], "default": default,
+                "cameras": [{"id": c["id"], "name": c["name"],
+                             "visible": policy.camera_visible(cfg, site, i, c["id"])}
+                            for c in site["cameras"]],
+            })
+    except Exception:
+        logger.exception("Could not list cameras for the guests page")
+        error = "Couldn't list the cameras. Try again in a minute."
+    return render(request, "cameras/settings_guests.html", {
+        "active": "cameras",
+        "page": {"sites": sites, "config": _guest_page_config(cfg), "error": error,
+                 "save_url": request.path},
     })
 
 
