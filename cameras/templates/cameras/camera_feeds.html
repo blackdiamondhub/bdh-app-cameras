@@ -664,16 +664,16 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
 
 {% load static %}
 <script>
-    // Build go2rtc base URL from the browser's current hostname
-    const GO2RTC_PORT = {{ go2rtc_port }};
-    const GO2RTC_BASE = `http://${window.location.hostname}:${GO2RTC_PORT}`;
+    // go2rtc only listens on the hub itself: the app serves its player and
+    // relays the player's websocket (checking the viewer may see the camera).
+    const WATCH_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}{{ watch_path }}`;
 
-    // Dynamically load video-stream.js from go2rtc
+    // Dynamically load video-stream.js (go2rtc's player)
     // Returns a promise that resolves when the script is loaded
     const go2rtcReady = new Promise((resolve, reject) => {
         const script = document.createElement('script');
         script.type = 'module';
-        script.src = `${GO2RTC_BASE}/video-stream.js`;
+        script.src = '{% url "camera_go2rtc_script" "video-stream.js" %}';
         script.onload = resolve;
         script.onerror = () => reject(new Error('Failed to load video-stream.js from go2rtc'));
         document.head.appendChild(script);
@@ -1169,7 +1169,7 @@ dropped ~85% of frames on the Sun Peaks tab (1.7.5). See README "Display perform
         clearInterval(el._fallbackPoll);
         const hi = el.classList.contains('cam-hi');
         el._live = false;
-        const url = `${GO2RTC_BASE}/api/ws?src=${src}`;
+        const url = `${WATCH_URL}?src=${encodeURIComponent(src)}`;
         const fallback = el.dataset.fallbackMode;
         el.background = true;
         el.mode = el.dataset.mode;

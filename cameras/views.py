@@ -28,6 +28,9 @@ from .protect_api import (
 
 logger = logging.getLogger(__name__)
 
+# go2rtc's player websocket, relayed by cameras.routing.watch.
+WATCH_PATH = '/cameras/api/ws'
+
 CLIP_DEFAULT = timedelta(seconds=30)
 CLIP_MAX = timedelta(seconds=120)
 
@@ -372,10 +375,6 @@ def camera_feed_view(request):
         streams, hero = _with_hero(get_go2rtc_streams(go2rtc_url))
         sites = [{'name': 'Cameras', 'streams': streams, 'hero': hero}]
 
-    # Extract port from GO2RTC_URL for browser-side URL construction
-    from urllib.parse import urlparse
-    go2rtc_port = urlparse(go2rtc_url).port or 1984
-
     active_site = _requested_site(request.GET.get('site'), sites)
 
     show_events = policy.can_see_events(request)
@@ -386,8 +385,7 @@ def camera_feed_view(request):
     return render(request, 'cameras/camera_feeds.html', {
         'sites': sites,
         'active_site': active_site,
-        'go2rtc_url': go2rtc_url,
-        'go2rtc_port': go2rtc_port,
+        'watch_path': WATCH_PATH,
         'is_admin': admin,
         'show_events': show_events,
         # Earliest moment the events rail and scrubber may reach (ms), 0 for no limit.
@@ -587,7 +585,6 @@ def popup(request, camera_id):
     if camera is None:
         raise Http404
     _register_streams_with_go2rtc(config.go2rtc_url(), [camera])
-    from urllib.parse import urlparse
     return render(request, 'cameras/popup.html', {
         'camera_id': camera_id,
         'stream': listen_stream_name(camera),
@@ -597,7 +594,7 @@ def popup(request, camera_id):
                         if camera.get('talkback') and policy.can_talk(request) else ''),
         # Inline only: guests without events can't use the snapshot view.
         'poster': _cached_poster(camera_id),
-        'go2rtc_port': urlparse(config.go2rtc_url()).port or 1984,
+        'watch_path': WATCH_PATH,
         'video_mode': config.video_mode(),
     })
 
@@ -607,7 +604,9 @@ def talk_prepare(request):
     """Refresh a speaker camera's talkback target before the kiosk starts talking.
 
     Re-registers ``<stream>_talk`` if Protect moved it. Returns
-    ``{"stream": ..., "port": ...}`` for ``BDHDisplay.talkStart``.
+    ``{"stream": ..., "port": ...}`` for ``BDHDisplay.talkStart``: the kiosk
+    connects to ``/api/talk?src=<stream>`` on this page's port, and ``stream``
+    is a single-use token for the camera (see :mod:`cameras.routing`).
     """
     camera_id = request.GET.get('camera', '')
     if camera_id and not (policy.can_view(request, camera_id, get_protect_cameras) and policy.can_talk(request)):
@@ -621,9 +620,42 @@ def talk_prepare(request):
     with _keeper_lock:
         _wanted.setdefault(go2rtc_url, {})[name] = source
     _sync_streams(go2rtc_url, {name: source})
-    # With echo cancelling, talk goes through the sidecar (same /api/talk).
-    port_of = config.aec_url() or go2rtc_url
-    return JsonResponse({'stream': name, 'port': urllib.parse.urlparse(port_of).port or 1984})
+    from .routing import issue_talk
+    return JsonResponse({'stream': issue_talk(name), 'port': _page_port(request)})
+
+
+def _page_port(request):
+    """The port the page was loaded from (the app's port on the hub)."""
+    host = request.get_host()
+    _, sep, port = host.rpartition(':')
+    if sep and port.isdigit() and not host.endswith(']'):
+        return int(port)
+    return 443 if request.is_secure() else 80
+
+
+# go2rtc's player. video-stream.js imports ./video-rtc.js, so both are served
+# from one directory.
+GO2RTC_SCRIPTS = ('video-stream.js', 'video-rtc.js')
+_scripts = {}
+
+
+@require_GET
+def go2rtc_script(request, name):
+    """go2rtc's player scripts, fetched once from go2rtc (browsers can't reach it)."""
+    if name not in GO2RTC_SCRIPTS:
+        raise Http404
+    body = _scripts.get(name)
+    if body is None:
+        try:
+            with urllib.request.urlopen(f'{config.go2rtc_url()}/{name}', timeout=5) as resp:
+                body = resp.read()
+        except (urllib.error.URLError, OSError) as err:
+            logger.warning("Failed to fetch %s from go2rtc: %s", name, err)
+            return HttpResponse(status=502)
+        _scripts[name] = body
+    resp = HttpResponse(body, content_type='application/javascript')
+    resp['Cache-Control'] = 'public, max-age=3600'
+    return resp
 
 
 @require_POST

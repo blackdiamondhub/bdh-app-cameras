@@ -24,6 +24,19 @@ The go2rtc companion's WebRTC port (8555) is bound on the host, because WebRTC o
 can't go through Docker's port proxy. Only one go2rtc per host can use it, so the hub's own
 go2rtc must be removed when cameras moves to a container.
 
+Browsers and kiosks never talk to go2rtc or the echo canceller (aec) directly: since 2.7.0b2
+(with bdh-supervisor binding both to `127.0.0.1`) the app relays them, checking the guest
+rules (`cameras/policy.py`) first:
+
+| Route | Relayed to | Check |
+|---|---|---|
+| `/cameras/api/ws?src=<stream>` (websocket) | go2rtc `/api/ws` (WebRTC signalling, MSE) | The viewer may see the stream's camera (`can_view`); never a `_talk` stream. |
+| `/api/talk?src=<token>` (websocket, the kiosk's `BDHDisplay.talkStart`) | aec `/api/talk`, or go2rtc's without aec | A single-use token from `/cameras/api/talk/prepare/`, which checks `can_view` and `can_talk`; it expires after 30 s. |
+| `/cameras/go2rtc/video-stream.js`, `video-rtc.js` | go2rtc's player scripts (cached) | None (static code). |
+
+WebRTC media still flows directly between the browser and go2rtc on port 8555; it's only
+reachable with the session set up over the relayed signalling.
+
 ## Configuration
 
 Admins add the UniFi Protect consoles (NVRs) on **Settings → NVRs** (`/cameras/settings/nvrs/`):

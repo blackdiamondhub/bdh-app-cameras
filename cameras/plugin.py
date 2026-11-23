@@ -5,6 +5,8 @@ spec = PluginSpec(
     id="cameras",
     app="cameras",
     urls="cameras.urls",
+    # Live video and talk, relayed to go2rtc/aec (which only listen on loopback).
+    websocket_routes="cameras.routing.websocket_urlpatterns",
     status="cameras.homepage.status",
     tiles=(
         Tile(
