@@ -1,0 +1,151 @@
+{% extends 'hub_settings/_layout.html' %}
+
+{% block title %}Cameras · Guests{% endblock %}
+
+{% block section %}
+<style>
+    .cg-sec { margin: 22px 4px 10px; color: var(--mut); font-size: 12.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+    .cg-sec .sub { text-transform: none; letter-spacing: 0; font-weight: 400; }
+    .cg-stale { color: var(--mut); font-size: 13px; font-weight: 400; margin-left: 6px; }
+    .cg-cam .lbl b { font-weight: 400; }
+    .cg-since { margin-top: 10px; }
+    .cg-since[hidden] { display: none; }
+    .cg-msg { color: var(--mut); padding: 14px 12px; font-size: 14px; }
+    #cg-status { min-width: 80px; text-align: right; color: var(--mut); font-size: 14px; }
+    #cg-status.bad { color: var(--red); }
+</style>
+
+{% csrf_token %}
+<div class="hst-head">
+    <div>
+        <h2>Guests</h2>
+        <p>What anyone who isn't signed in as an admin can see and do. Admins always see everything.</p>
+    </div>
+    <div class="act" style="flex-shrink:0"><span id="cg-status" aria-live="polite"></span><a class="hst-btn ghost" style="display:flex;align-items:center;white-space:nowrap;text-decoration:none" href="{% url 'cameras_settings' %}">‹ Cameras</a></div>
+</div>
+
+<div class="cg-sec">Cameras <span class="sub">· New NVRs and cameras on a hidden NVR stay hidden</span></div>
+{% if page.error %}<div class="hst-note bad">{{ page.error }}</div>{% endif %}
+<div id="cg-sites"></div>
+
+<div class="cg-sec">What guests can do</div>
+<div class="hst-card">
+    <div class="hst-row">
+        <div class="lbl"><b>Talk</b><small>Talk through cameras with a speaker.</small></div>
+        <div class="ctl"><label class="hst-tog"><input type="checkbox" id="cg-talk" aria-label="Guests can talk"><span></span></label></div>
+    </div>
+    <div class="hst-row">
+        <div class="lbl"><b>Move cameras</b><small>Send PTZ cameras to their presets.</small></div>
+        <div class="ctl"><label class="hst-tog"><input type="checkbox" id="cg-ptz" aria-label="Guests can move PTZ cameras"><span></span></label></div>
+    </div>
+    <div class="hst-row" style="display:block">
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+            <div class="lbl" style="flex:1"><b>Events and recordings</b><small>The events panel, timeline and replays, for the cameras guests can see.</small></div>
+            <div class="ctl">
+                <select class="hst-in" id="cg-events" aria-label="Guest events">
+                    <option value="off">Off</option>
+                    <option value="24h">Last 24 hours</option>
+                    <option value="since">Since…</option>
+                </select>
+            </div>
+        </div>
+        <div class="cg-since" id="cg-since-row" hidden>
+            <label class="lbl"><small>Nothing before</small>
+                <input class="hst-in" type="datetime-local" id="cg-since" aria-label="Guests see events since"></label>
+            <small class="cg-msg" style="padding:0">Hub time. Useful at check-in, so guests don't see the last stay.</small>
+        </div>
+    </div>
+</div>
+
+{{ page|json_script:"cg-data" }}
+<script>
+(function () {
+    const page = JSON.parse(document.getElementById('cg-data').textContent);
+    const cfg = page.config;
+    const csrf = document.querySelector('[name=csrfmiddlewaretoken]').value;
+    const status = document.getElementById('cg-status');
+    const el = (tag, props, ...kids) => {
+        const n = Object.assign(document.createElement(tag), props || {});
+        kids.forEach(k => k != null && n.append(k));
+        return n;
+    };
+
+    let timer = null, saving = Promise.resolve();
+    function save() {
+        clearTimeout(timer);
+        status.className = ''; status.textContent = 'Saving…';
+        timer = setTimeout(() => {
+            const body = JSON.stringify(cfg);
+            saving = saving.then(() => fetch(page.save_url, {
+                method: 'POST', body, credentials: 'same-origin',
+                headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrf},
+            }).then(r => {
+                if (!r.ok) throw new Error(r.status);
+                status.textContent = 'Saved ✓';
+            }).catch(() => { status.className = 'bad'; status.textContent = 'Not saved'; }));
+        }, 400);
+    }
+
+    // Saving writes every NVR shown here, so an NVR on its default (e.g. the first one) is kept.
+    page.sites.forEach(site => {
+        if (site.id != null && !cfg.nvrs[site.id]) cfg.nvrs[site.id] = {default: site.default, cameras: {}};
+    });
+
+    const sitesEl = document.getElementById('cg-sites');
+    function render() {
+        sitesEl.replaceChildren();
+        if (!page.sites.length && !page.error) {
+            sitesEl.append(el('div', {className: 'hst-card'}, el('div', {className: 'cg-msg', textContent: 'No cameras found. Add an NVR first.'})));
+            return;
+        }
+        page.sites.forEach(site => {
+            const card = el('div', {className: 'hst-card'});
+            const nvr = site.id != null ? cfg.nvrs[site.id] : null;
+            const dflt = el('select', {className: 'hst-in', ariaLabel: (site.name || 'NVR') + ': guests see', disabled: !nvr},
+                el('option', {value: 'visible', textContent: 'Visible'}), el('option', {value: 'hidden', textContent: 'Hidden'}));
+            dflt.value = nvr ? nvr.default : site.default;
+            dflt.addEventListener('change', () => { nvr.default = dflt.value; nvr.cameras = {}; render(); save(); });
+            card.append(el('div', {className: 'hst-row'},
+                el('div', {className: 'lbl'}, el('b', {textContent: site.name || 'Cameras'},
+                    site.stale ? el('span', {className: 'cg-stale', textContent: '· showing last-known cameras'}) : null),
+                    el('small', {textContent: 'Guests see its cameras unless set otherwise below'})),
+                el('div', {className: 'ctl'}, dflt)));
+            site.cameras.forEach(cam => {
+                const on = nvr ? (nvr.cameras[cam.id] || nvr.default) === 'visible' : cam.visible;
+                const box = el('input', {type: 'checkbox', checked: on, disabled: !nvr, ariaLabel: cam.name + ': guests see it'});
+                box.addEventListener('change', () => {
+                    const v = box.checked ? 'visible' : 'hidden';
+                    if (v === nvr.default) delete nvr.cameras[cam.id]; else nvr.cameras[cam.id] = v;
+                    save();
+                });
+                card.append(el('div', {className: 'hst-row cg-cam'},
+                    el('div', {className: 'lbl'}, el('b', {textContent: cam.name})),
+                    el('div', {className: 'ctl'}, el('label', {className: 'hst-tog'}, box, el('span')))));
+            });
+            sitesEl.append(card);
+        });
+    }
+    render();
+
+    const talk = document.getElementById('cg-talk'), ptz = document.getElementById('cg-ptz');
+    talk.checked = cfg.talk; ptz.checked = cfg.ptz;
+    talk.addEventListener('change', () => { cfg.talk = talk.checked; save(); });
+    ptz.addEventListener('change', () => { cfg.ptz = ptz.checked; save(); });
+
+    const events = document.getElementById('cg-events'), since = document.getElementById('cg-since');
+    const sinceRow = document.getElementById('cg-since-row');
+    events.value = cfg.events; since.value = cfg.events_since || '';
+    const sync = () => { sinceRow.hidden = events.value !== 'since'; };
+    sync();
+    events.addEventListener('change', () => {
+        sync();
+        if (events.value === 'since' && !since.value) { since.focus(); return; }
+        cfg.events = events.value; save();
+    });
+    since.addEventListener('change', () => {
+        cfg.events_since = since.value;
+        if (since.value) { cfg.events = events.value; save(); }
+    });
+})();
+</script>
+{% endblock %}

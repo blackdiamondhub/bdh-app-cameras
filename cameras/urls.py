@@ -14,6 +14,7 @@ urlpatterns = [
     path('popup/<str:camera_id>/', views.popup, name='camera_popup'),
     path('settings/', views.main_settings, name='cameras_settings'),
     path('settings/popups/', views.popup_settings, name='cameras_popups'),
+    path('settings/guests/', views.guests_settings, name='cameras_guests'),
     path('settings/popups/entities/', views.popup_entities, name='cameras_popup_entities'),
     path('settings/nvrs/', views.nvr_settings, name='cameras_nvrs'),
     path('settings/nvrs/save/', views.nvr_save, name='cameras_nvr_save'),

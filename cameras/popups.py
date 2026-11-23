@@ -24,11 +24,16 @@ Only choices that differ from the defaults are stored: ``sounds`` per
 detection kind (see :func:`kind_sound`) and ``sound`` per trigger
 (``TRIGGER_SOUND``).
 
+A camera with ``"audience": "admins"`` pops up only on screens with an admin
+signed in (``admins_only`` alerts); so does every camera guests can't see
+(see ``policy.py``). Without it the pop-up is for everyone.
+
 Until that page is saved, a ring pops up its doorbell camera.
 
 Pop-ups use the doorbell's alert key, so a new trigger while one is showing
 just restarts its timer.
 """
+import asyncio
 import logging
 import re
 import threading
@@ -56,6 +61,8 @@ KIND_SOUNDS = {"doorbell": "ding-dong", "person": "notify", "smoke": "low-pulse"
                "baby": "soft-bell"}
 OTHER_KIND_SOUND = "single-ding"
 TRIGGER_SOUND = "knock-knock"
+# Who a camera pops up for: everyone (the default, not stored) or only signed-in admins.
+EVERYONE, ADMINS = "everyone", "admins"
 
 _OPENINGS = {"door", "garage_door", "opening", "window"}
 _NO_STATE = {None, "", "unavailable", "unknown"}
@@ -118,6 +125,8 @@ def clean(raw):
         sounds = {k: s for k in entry["kinds"] if (s := _sound(given.get(k), kind_sound(k)))}
         if sounds:
             entry["sounds"] = sounds
+        if cam.get("audience") == ADMINS:
+            entry["audience"] = ADMINS
         if entry["kinds"] or entry["triggers"]:
             cameras[camera_id] = entry
     out = {"enabled": raw.get("enabled", True) is not False, "cameras": cameras}
@@ -183,6 +192,20 @@ def camera_sound(camera_id, kind):
     return sounds.get(kind, kind_sound(kind))
 
 
+def camera_admins_only(camera_id):
+    """Whether ``camera_id`` pops up only on signed-in screens (reads the database).
+
+    Set per camera on the Pop-ups page, and always so for cameras guests
+    can't see.
+    """
+    from . import policy
+
+    cfg = stored()
+    if cfg and cfg["cameras"].get(camera_id, {}).get("audience") == ADMINS:
+        return True
+    return camera_id not in policy.visible_camera_ids()
+
+
 def matches(trigger, data):
     """True when the HA state change ``data`` (``{old, new, ...}``) should fire ``trigger``."""
     if not isinstance(data, dict) or "new" not in data:
@@ -220,10 +243,15 @@ def title_for(data, camera_name):
     return label
 
 
-def handle(event, trigger, camera_id):
+async def handle(event, trigger, camera_id):
     """Pop up camera ``camera_id`` when ``event`` fires ``trigger``."""
     if not matches(trigger, event.data):
         return
+    # Off the event loop: who it's for is read from the database.
+    await asyncio.to_thread(_push, event, trigger, camera_id)
+
+
+def _push(event, trigger, camera_id):
     close_old_connections()
     try:
         cam = _camera_by_id(camera_id)
@@ -239,6 +267,7 @@ def handle(event, trigger, camera_id):
             embed_url=f"/cameras/popup/{cam['camera_id']}/",
             ttl=config.popup_seconds(),
             sound=trigger.get("sound", TRIGGER_SOUND),
+            admins_only=camera_admins_only(cam["camera_id"]),
         ))
     except Exception:
         logger.exception("Event pop-up for %s failed", event.topic)

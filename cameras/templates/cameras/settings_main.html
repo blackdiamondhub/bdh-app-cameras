@@ -83,6 +83,16 @@
         </a>
     </div>
 
+    <div class="cs-sec">Guests <span class="sub">· Anyone not signed in as an admin</span>{% if not p.nvrs %}<span class="lock">🔒 Needs an NVR</span>{% endif %}</div>
+    <div class="hst-card">
+        <a class="hst-row hst-link" href="{{ p.guests_url }}">
+            <div class="lbl"><b>What guests see</b>
+                <small>{{ p.guests.visible }} of {{ p.guests.cameras }} camera{{ p.guests.cameras|pluralize }} · Talk {% if p.guests.talk %}on{% else %}off{% endif %} · PTZ {% if p.guests.ptz %}on{% else %}off{% endif %} · Events {% if p.guests.events == '24h' %}last 24 hours{% elif p.guests.events == 'since' %}since {{ p.guests.since }}{% else %}off{% endif %}</small>
+            </div>
+            <span class="go">›</span>
+        </a>
+    </div>
+
     <div class="cs-sec">Cameras page{% if not p.nvrs %}<span class="lock">🔒 Needs an NVR</span>{% endif %}</div>
     <div class="hst-card">
         <div class="hst-row">

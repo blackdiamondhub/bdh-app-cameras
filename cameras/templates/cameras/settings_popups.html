@@ -9,6 +9,9 @@
     .cp-cam { display: block; }
     .cp-cam .top { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
     .cp-cam .top .lbl { flex: 1; min-width: 160px; }
+    .cp-who { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .cp-who > small { color: var(--mut); font-size: 13.5px; }
+    .cp-who select:disabled { opacity: .6; cursor: not-allowed; }
     .cp-tiles { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
     .cp-tile { flex: 1 1 0; min-width: 150px; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 14px; background: rgba(255,255,255,.04); color: var(--mut); cursor: pointer; }
     .cp-tile.on { flex-grow: 1.4; border-color: var(--acc); background: rgba(91,164,230,.13); color: #eef3fa; }
@@ -272,8 +275,18 @@ document.addEventListener('DOMContentLoaded', function () {
         const note = !camKinds.length
             ? 'This camera has no smart detections, so it can only pop up from a Home Assistant trigger'
             : (cam.doorbell ? 'Doorbell · pops up when it detects' : 'Pops up when it detects');
+        const audience = el('select', {className: 'hst-in', ariaLabel: cam.name + ': who it pops up for', disabled: cam.guest_hidden},
+            el('option', {value: 'everyone', textContent: 'Everyone'}),
+            el('option', {value: 'admins', textContent: 'Only when signed in'}));
+        audience.value = cam.guest_hidden || c.audience === 'admins' ? 'admins' : 'everyone';
+        audience.addEventListener('change', () => {
+            if (audience.value === 'admins') c.audience = 'admins'; else delete c.audience;
+            save();
+        });
+        const shownTo = el('div', {className: 'cp-who'}, el('small', {textContent: 'Pop up for'}), audience);
+        if (cam.guest_hidden) shownTo.append(el('small', {className: 'cp-hint', textContent: 'Hidden from guests, so only when signed in'}));
         row.append(el('div', {className: 'top'},
-            el('div', {className: 'lbl'}, el('b', {textContent: cam.name}), el('small', {textContent: note}))));
+            el('div', {className: 'lbl'}, el('b', {textContent: cam.name}), el('small', {textContent: note})), shownTo));
         if (camKinds.length) row.append(tiles);
         if (offInProtect.length) {
             row.append(el('small', {className: 'cp-hint', textContent: 'Also available, off in Protect: ' + offInProtect.map(k => KIND_LABEL[k]).join(', ')}));

@@ -777,13 +777,13 @@ class HeroLayoutTests(TestCase):
     ]),
 )
 class CameraFeedViewAuthFilterTests(TestCase):
-    """Only the primary site is visible to unauthenticated users."""
+    """Until the Guests page is saved, guests see only the first site; admins see all."""
 
     def setUp(self):
         self.client = Client()
         clear_cache()
         self.user = User.objects.create_user(
-            username='testuser', password='testpass',
+            username='testuser', password='testpass', is_staff=True,
         )
 
     @patch("cameras.views._register_streams_with_go2rtc")
@@ -824,7 +824,7 @@ class CameraFeedViewAuthFilterTests(TestCase):
     @patch("cameras.views._register_streams_with_go2rtc")
     @patch("cameras.views.get_protect_cameras")
     def test_authenticated_sees_all_sites(self, mock_cameras, mock_register):
-        """Logged-in users see all configured sites."""
+        """Signed-in admins see all configured sites."""
         mock_cameras.return_value = MULTI_SITE_CAMERAS
         self.client.login(username='testuser', password='testpass')
 
@@ -838,7 +838,7 @@ class CameraFeedViewAuthFilterTests(TestCase):
     @patch("cameras.views._register_streams_with_go2rtc")
     @patch("cameras.views.get_protect_cameras")
     def test_authenticated_sees_site_tabs(self, mock_cameras, mock_register):
-        """Logged-in users see the site tab bar with both sites."""
+        """Signed-in admins see the site tab bar with both sites."""
         mock_cameras.return_value = MULTI_SITE_CAMERAS
         self.client.login(username='testuser', password='testpass')
 
@@ -1462,6 +1462,10 @@ class PtzGotoViewTests(TestCase):
 
     def setUp(self):
         self.client = Client()
+        p = patch('cameras.views.get_protect_cameras', return_value=[{'name': 'Home', 'cameras': [
+            {'camera_id': 'cam_ptz'}, {'camera_id': 'cam_fixed'}]}])
+        p.start()
+        self.addCleanup(p.stop)
 
     @patch('cameras.views.ptz_goto_preset')
     def test_successful_goto(self, mock_goto):
@@ -1631,7 +1635,7 @@ class TalkPrepareViewTests(TestCase):
         mock_refresh.assert_not_called()
         self.assertEqual(self.client.post(self.URL + '?camera=door').status_code, 200)
 
-        user = User.objects.create_user('staff', password='pw')
+        user = User.objects.create_user('staff', password='pw', is_staff=True)
         self.client.force_login(user)
         self.assertEqual(self.client.post(self.URL + '?camera=cabin').status_code, 200)
 
@@ -1803,7 +1807,7 @@ class MultiSiteTabTests(TestCase):
         self.client = Client()
         clear_cache()
         self.user = User.objects.create_user(
-            username='testuser', password='testpass',
+            username='testuser', password='testpass', is_staff=True,
         )
         self.client.login(username='testuser', password='testpass')
 
@@ -2215,7 +2219,7 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
             {'name': 'Test Cam', 'stream_name': 'test_cam', 'rtsp_url': 'rtsps://x',
              'rtsp_url_low': '', 'camera_id': 'cam1', 'is_ptz': False, 'ptz_presets': 0},
         ]}]
-        with patch('cameras.views.is_admin', return_value=True), \
+        with patch('cameras.policy.is_admin', return_value=True), \
                 patch('cameras.config.protect_sites', return_value=[{'name': 'Test Site'}]), \
                 patch('cameras.views.get_protect_cameras', return_value=cams), \
                 patch('cameras.views._register_streams_with_go2rtc'), \
@@ -2934,9 +2938,9 @@ class EventStorageTests(TestCase):
 
     def test_only_admins_hear_pushes(self):
         from bdh_sdk import push
-        with patch("cameras.views.is_admin", return_value=False):
+        with patch("cameras.policy.is_admin", return_value=False):
             self.assertEqual(push.patterns_for(MagicMock(), "cameras"), [])
-        with patch("cameras.views.is_admin", return_value=True):
+        with patch("cameras.policy.is_admin", return_value=True):
             self.assertEqual(push.patterns_for(MagicMock(), "cameras"), ["cameras/#"])
 
     def test_prune_drops_older_than_24h(self):
@@ -2983,7 +2987,7 @@ class RingAlertTests(TestCase):
             return [] if fn is ev_mod._save else fn(*args)
         self.worker._in_db = fake_in_db
 
-    def _handle(self, kinds, seconds_ago=2, wanted=("doorbell",), event_id="r1"):
+    def _handle(self, kinds, seconds_ago=2, wanted=("doorbell",), event_id="r1", admins_only=False):
         import asyncio
         row = {"event_id": event_id, "camera_id": "cam1", "kinds": kinds,
                "start": datetime.now(dt_tz.utc) - timedelta(seconds=seconds_ago), "end": None, "score": 0}
@@ -2994,12 +2998,13 @@ class RingAlertTests(TestCase):
         with patch.object(ev_mod, "_push_popup", fake_push), \
                 patch("cameras.popups.camera_kinds", return_value=list(wanted)), \
                 patch("cameras.popups.camera_sound", side_effect=lambda cam, kind: f"{kind}-chime"), \
+                patch("cameras.popups.camera_admins_only", return_value=admins_only), \
                 patch("cameras.config.popup_seconds", return_value=45):
             asyncio.run(self.worker._handle(row))
         return pushed
 
     def test_fresh_ring_pushes_alert(self):
-        self.assertEqual(self._handle(["doorbell"]), [("cam1", "Doorbell", 45, "doorbell", "doorbell-chime")])
+        self.assertEqual(self._handle(["doorbell"]), [("cam1", "Doorbell", 45, "doorbell", "doorbell-chime", False)])
 
     def test_old_or_unwanted_does_not_push(self):
         self.assertEqual(self._handle(["doorbell"], seconds_ago=120), [])
@@ -3009,10 +3014,10 @@ class RingAlertTests(TestCase):
     def test_each_kind_pops_up_once_per_event(self):
         wanted = ("person", "package")
         self.assertEqual(self._handle([], wanted=wanted), [])
-        self.assertEqual(self._handle(["person"], wanted=wanted), [("cam1", "Doorbell", 45, "person", "person-chime")])
+        self.assertEqual(self._handle(["person"], wanted=wanted), [("cam1", "Doorbell", 45, "person", "person-chime", False)])
         self.assertEqual(self._handle(["person"], wanted=wanted), [])
         self.assertEqual(self._handle(["person", "package"], wanted=wanted),
-                         [("cam1", "Doorbell", 45, "package", "package-chime")])
+                         [("cam1", "Doorbell", 45, "package", "package-chime", False)])
 
     def test_push_builds_alert(self):
         import asyncio
@@ -3024,20 +3029,24 @@ class RingAlertTests(TestCase):
         with patch.dict(sys.modules, {"bdh_sdk.alerts": fake}), \
                 patch("bdh_sdk.alerts", fake, create=True):
             asyncio.run(ev_mod._push_popup("cam1", "Front", 45))
-            asyncio.run(ev_mod._push_popup("cam1", "Front", 45, "vehicle", "none"))
+            asyncio.run(ev_mod._push_popup("cam1", "Front", 45, "vehicle", "none", True))
         self.assertEqual([c.args[0] for c in fake.push.call_args_list], [{
             "app": "cameras", "key": "doorbell:cam1", "title": "Someone's at the door (Front)",
-            "embed_url": "/cameras/popup/cam1/", "ttl": 45, "sound": None,
+            "embed_url": "/cameras/popup/cam1/", "ttl": 45, "sound": None, "admins_only": False,
         }, {
             "app": "cameras", "key": "doorbell:cam1", "title": "Vehicle at Front",
-            "embed_url": "/cameras/popup/cam1/", "ttl": 45, "sound": "none",
+            "embed_url": "/cameras/popup/cam1/", "ttl": 45, "sound": "none", "admins_only": True,
         }])
+
+    def test_signed_in_only_camera_pops_up_for_admins_only(self):
+        self.assertEqual(self._handle(["doorbell"], admins_only=True),
+                         [("cam1", "Doorbell", 45, "doorbell", "doorbell-chime", True)])
 
 
 class EventViewTests(TestCase):
     def setUp(self):
         self.is_admin = False
-        p = patch("cameras.views.is_admin", side_effect=lambda request: self.is_admin)
+        p = patch("cameras.policy.is_admin", side_effect=lambda request: self.is_admin)
         p.start()
         self.addCleanup(p.stop)
         frames_mod.clear()
@@ -3406,7 +3415,7 @@ class EventTemplateTests(TestCase):
     @patch("cameras.views.get_protect_cameras")
     def test_admin_sees_rail_and_scrubber(self, mock_cameras, _):
         mock_cameras.return_value = self.CAMS
-        with patch("cameras.views.is_admin", return_value=True):
+        with patch("cameras.policy.is_admin", return_value=True):
             html = Client().get("/cameras/").content.decode()
         # First (visible) site's stills load eagerly with the page
         self.assertIn('<img class="cam-poster" alt="" src="/cameras/snapshot/cam1/?w=640">', html)
@@ -3426,7 +3435,7 @@ class EventTemplateTests(TestCase):
         from cameras import frames
         mock_cameras.return_value = self.CAMS
         cached = {("cam1", 640): [time.monotonic(), b"jpg", 0]}
-        with patch("cameras.views.is_admin", return_value=True), \
+        with patch("cameras.policy.is_admin", return_value=True), \
                 patch.dict(frames._live, cached, clear=True):
             html = Client().get("/cameras/").content.decode()
             stale = {("cam1", 640): [time.monotonic() - frames.LIVE_MAX_AGE - 1, b"jpg", 0]}
@@ -3589,6 +3598,8 @@ class PopupStoredConfigTests(TestCase):
         for target, kw in (
             ("cameras.config.popup_seconds", {"return_value": 45}),
             ("cameras.protect_api.get_protect_cameras", {"return_value": self.CAMS}),
+            # Its database read runs in a worker thread, which can't see the test's transaction.
+            ("cameras.popups.camera_admins_only", {"return_value": False}),
         ):
             p = patch(target, **kw)
             p.start()
@@ -3708,7 +3719,7 @@ class PopupSettingsViewTests(TestCase):
         self.addCleanup(popups_mod.stop)
         self.is_admin = False
         for target, kw in (
-            ("cameras.views.is_admin", {"side_effect": lambda request: self.is_admin}),
+            ("cameras.policy.is_admin", {"side_effect": lambda request: self.is_admin}),
             ("cameras.views.get_protect_cameras", {"return_value": PopupStoredConfigTests.CAMS}),
             ("cameras.protect_api.get_protect_cameras", {"return_value": PopupStoredConfigTests.CAMS}),
         ):
@@ -3899,7 +3910,7 @@ class MainSettingsViewTests(TestCase):
         self.nvrs = [{"id": "1", "name": "Home", "host": "10.0.0.1", "username": "",
                       "has_api_key": True, "has_password": False}]
         for target, kw in (
-            ("cameras.views.is_admin", {"side_effect": lambda request: self.is_admin}),
+            ("cameras.policy.is_admin", {"side_effect": lambda request: self.is_admin}),
             ("cameras.views._nvr_rows", {"side_effect": lambda: [dict(n) for n in self.nvrs]}),
             ("cameras.views.get_protect_cameras", {"return_value": self.SITES}),
             ("cameras.protect_api.get_protect_cameras", {"return_value": self.SITES}),
@@ -4022,7 +4033,7 @@ class BrokerTests(TestCase):
         config.forget_sites()
         self.addCleanup(config.forget_sites)
         for p in (patch.object(config, "protect_sites", _real_protect_sites),
-                  patch("cameras.views.is_admin", return_value=True),
+                  patch("cameras.policy.is_admin", return_value=True),
                   patch("cameras.events.restart")):
             p.start()
             self.addCleanup(p.stop)
@@ -4128,7 +4139,7 @@ class BrokerTests(TestCase):
                 "devices": [{"id": "d", "name": f"{label}", "manufacturer": "Ring", "area_id": "porch"}],
                 "areas": [{"area_id": "porch", "name": f"{label} Porch"}],
             }
-        with patch("cameras.views.is_admin", return_value=True):
+        with patch("cameras.policy.is_admin", return_value=True):
             data = self.client.get("/cameras/settings/popups/entities/").json()
         self.assertEqual([(d["instance"], d["name"], d["area"]) for d in data["devices"]],
                          [("ha", "Front", "Front Porch"), ("ha_bdl", "Lodge", "Lodge Porch")])
@@ -4175,3 +4186,368 @@ class HubFrameLayoutTests(SimpleTestCase):
                 if pattern.search(line):
                     hits.append(f"{path.relative_to(root)}:{n}: {line.strip()}")
         self.assertEqual(hits, [])
+
+
+# --- Guests: what anyone not signed in as an admin may see and do ---
+
+from . import policy as policy_mod  # noqa: E402
+
+GUEST_SITES = [
+    {"id": "1", "name": "Home", "ok": True, "cameras": [
+        {"camera_id": "pub", "name": "Porch", "stream_name": "porch", "rtsp_url": "rtsps://x",
+         "is_ptz": True, "ptz_presets": 2, "has_mic": True, "has_speaker": True,
+         "talkback": {"url": "rtp://1.2.3.4:7004", "codec": "opus", "rate": 24000}},
+        {"camera_id": "shed", "name": "Shed", "stream_name": "shed", "rtsp_url": "rtsps://x"}]},
+    {"id": "2", "name": "Cabin", "ok": True, "cameras": [
+        {"camera_id": "priv", "name": "Cabin Door", "stream_name": "cabin_door", "rtsp_url": "rtsps://x",
+         "is_ptz": True, "ptz_presets": 2, "has_speaker": True,
+         "talkback": {"url": "rtp://1.2.3.5:7004", "codec": "opus", "rate": 24000}}]},
+]
+
+
+class GuestTestCase(TestCase):
+    """Two NVRs; until the Guests page is saved, guests see only the first."""
+
+    def setUp(self):
+        from bdh_sdk.storage import app_state
+        self.state = app_state("cameras")
+        for key in (policy_mod.STATE_KEY, popups_mod.STATE_KEY):
+            self.addCleanup(self.state.delete, key)
+        self.is_admin = False
+        for target, kw in (
+            ("cameras.policy.is_admin", {"side_effect": lambda request: self.is_admin}),
+            ("cameras.views.get_protect_cameras", {"return_value": GUEST_SITES}),
+            ("cameras.protect_api.get_protect_cameras", {"return_value": GUEST_SITES}),
+            ("cameras.config.protect_sites", {"return_value": [{"host": "10.0.0.1", "api_key": "k"}]}),
+            ("cameras.views._register_streams_with_go2rtc", {}),
+            ("cameras.views._cached_poster", {"return_value": None}),
+        ):
+            p = patch(target, **kw)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def guests(self, **cfg):
+        cfg.setdefault("nvrs", {"1": {"default": "visible"}})
+        return policy_mod.save(cfg)
+
+
+class GuestPolicyTests(GuestTestCase):
+    def visible(self):
+        return policy_mod.visible_camera_ids()
+
+    def test_first_nvr_until_saved(self):
+        self.assertIsNone(policy_mod.stored())
+        self.assertEqual(self.visible(), {"pub", "shed"})
+        self.assertEqual((policy_mod.current()["talk"], policy_mod.current()["events"]), (True, "off"))
+        # Whatever NVR is listed first, even one with no id.
+        sites = [{"name": "Old", "cameras": [{"camera_id": "a"}]}, GUEST_SITES[0]]
+        self.assertEqual(policy_mod.visible_camera_ids(sites=sites), {"a"})
+
+    def test_nvrs_not_on_the_page_are_hidden(self):
+        self.guests(nvrs={"2": {"default": "visible"}})
+        self.assertEqual(self.visible(), {"priv"})
+        self.guests(nvrs={})
+        self.assertEqual(self.visible(), set())
+
+    def test_camera_overrides(self):
+        self.guests(nvrs={"1": {"default": "visible", "cameras": {"shed": "hidden"}},
+                          "2": {"default": "hidden", "cameras": {"priv": "visible"}}})
+        self.assertEqual(self.visible(), {"pub", "priv"})
+
+    def test_clean(self):
+        clean = policy_mod.clean
+        self.assertEqual(clean({"events": "since"})["events"], "off")
+        self.assertEqual(clean({"events": "since", "events_since": "nope"})["events"], "off")
+        self.assertEqual(clean({"events": "forever", "talk": "no", "ptz": False}),
+                         {"nvrs": {}, "talk": True, "ptz": False, "events": "off", "events_since": ""})
+        # Overrides equal to the NVR's default aren't kept; junk is dropped.
+        self.assertEqual(clean({"nvrs": {"1": {"default": "visible", "cameras": {
+            "a": "visible", "b": "hidden", "c": "maybe"}}, "": {}, "3": "x"}})["nvrs"],
+            {"1": {"default": "visible", "cameras": {"b": "hidden"}}})
+        # A naive time is the hub's local time.
+        since = clean({"events": "since", "events_since": "2026-05-24T18:00"})["events_since"]
+        self.assertEqual(datetime.fromisoformat(since),
+                         dj_tz.make_aware(datetime(2026, 5, 24, 18, 0), dj_tz.get_current_timezone()))
+
+    def test_admins_can_do_everything(self):
+        self.guests(nvrs={}, talk=False, ptz=False)
+        self.is_admin = True
+        request = MagicMock()
+        self.assertTrue(policy_mod.can_view(request, "priv"))
+        self.assertTrue(policy_mod.can_talk(request) and policy_mod.can_ptz(request))
+        self.assertTrue(policy_mod.can_see_events(request))
+        self.assertIsNone(policy_mod.event_window(request))
+
+    def test_homepage_counts_what_guests_see(self):
+        from bdh_sdk import OWNER
+        from .homepage import status
+        with patch("cameras.homepage.get_protect_cameras", return_value=GUEST_SITES):
+            self.assertEqual(status().text, "2 cameras")
+            self.assertEqual(status(mode=OWNER).text, "3 cameras")
+            self.guests(nvrs={"2": {"default": "visible"}})
+            self.assertEqual(status().text, "1 camera")
+
+    def test_push_topics(self):
+        from .views import push_topics
+        request = MagicMock()
+        self.assertEqual(push_topics(request), [])
+        self.guests(events="24h")
+        self.assertEqual(push_topics(request), [ev_mod.CHANGED_TOPIC])
+        self.is_admin = True
+        self.assertEqual(push_topics(request), ["cameras/#"])
+
+
+class GuestEndpointTests(GuestTestCase):
+    """Every route serving camera data checks the guest rules.
+
+    A new route has to be listed in ROUTES (with how a guest asks it for a
+    camera) or EXEMPT, so one can't be added without thinking about guests.
+    """
+    EXEMPT = {
+        "camera_rtc_diag", "camera_rtc_events",  # browser diagnostics posted to the log
+    }
+    SETTINGS = {"cameras_settings", "cameras_popups", "cameras_guests", "cameras_popup_entities",
+                "cameras_nvrs", "cameras_nvr_save", "cameras_nvr_remove", "cameras_nvr_test"}
+
+    def setUp(self):
+        super().setUp()
+        self.guests(events="24h")
+        for camera_id in ("pub", "priv"):
+            _ev(f"ev_{camera_id}", ["person"], minutes_ago=5, camera_id=camera_id, thumb=b"jpg")
+        for target, kw in (
+            ("cameras.views.ptz_goto_preset", {"return_value": True}),
+            ("cameras.views.refresh_talkback", {"side_effect": self._camera}),
+            ("cameras.views._sync_streams", {}),
+            ("cameras.frames.live_get", {"return_value": b"img"}),
+            ("cameras.views.clips.get", {"return_value": None}),
+        ):
+            p = patch(target, **kw)
+            setattr(self, target.rsplit(".", 1)[1], p.start())
+            self.addCleanup(p.stop)
+
+    @staticmethod
+    def _camera(camera_id):
+        return next(c for s in GUEST_SITES for c in s["cameras"] if c["camera_id"] == camera_id)
+
+    def _feed(self, camera_id):
+        html = self.client.get("/cameras/").content.decode()
+        return 200 if f'data-camera-id="{camera_id}"' in html else 404
+
+    def _events(self, camera_id):
+        resp = self.client.get("/cameras/events/")
+        if resp.status_code != 200:
+            return resp.status_code
+        return 200 if camera_id in [e["camera_id"] for e in resp.json()["events"]] else 404
+
+    def _ptz(self, camera_id):
+        return self.client.post("/cameras/ptz/goto/", json.dumps({"camera_id": camera_id, "slot": 0}),
+                                content_type="application/json").status_code
+
+    ROUTES = {
+        "cameras": _feed,
+        "camera_events": _events,
+        "camera_event_thumb": lambda self, cid: self.client.get(f"/cameras/events/ev_{cid}/thumb/").status_code,
+        "camera_snapshot": lambda self, cid: self.client.get(f"/cameras/snapshot/{cid}/").status_code,
+        # The clip cache is mocked empty: 404 means the request got past the checks.
+        "camera_clip": lambda self, cid: (lambda s: 200 if s == 404 else s)(self.client.get(
+            f"/cameras/clip/{cid}/?start={int(time.time()) - 60}").status_code),
+        "camera_popup": lambda self, cid: self.client.get(f"/cameras/popup/{cid}/").status_code,
+        "camera_talk_prepare": lambda self, cid: self.client.post(
+            f"/cameras/api/talk/prepare/?camera={cid}").status_code,
+        "ptz_goto": _ptz,
+    }
+
+    def test_every_route_is_classified(self):
+        from .urls import urlpatterns
+        names = {p.name for p in urlpatterns}
+        self.assertEqual(names - set(self.ROUTES) - self.EXEMPT - self.SETTINGS, set())
+
+    def test_guests_only_reach_cameras_they_see(self):
+        for name, ask in self.ROUTES.items():
+            with self.subTest(route=name):
+                self.assertEqual(ask(self, "pub"), 200, "visible camera")
+                self.assertIn(ask(self, "priv"), (403, 404), "hidden camera")
+        self.ptz_goto_preset.assert_called_once_with("pub", 0)
+        self.assertEqual([c.args[0] for c in self.refresh_talkback.call_args_list], ["pub"])
+
+    def test_admins_reach_every_camera(self):
+        self.is_admin = True
+        for name, ask in self.ROUTES.items():
+            with self.subTest(route=name):
+                self.assertEqual(ask(self, "priv"), 200)
+
+    def test_settings_are_admins_only(self):
+        from django.urls import reverse
+        for name in self.SETTINGS:
+            with self.subTest(route=name):
+                url = reverse(name)
+                self.assertEqual(self.client.get(url).status_code, 404)
+                self.assertEqual(self.client.post(url, "{}", content_type="application/json").status_code, 404)
+
+    def test_events_off_hides_history(self):
+        self.guests(events="off")
+        for name in ("camera_events", "camera_event_thumb", "camera_snapshot", "camera_clip"):
+            with self.subTest(route=name):
+                self.assertEqual(self.ROUTES[name](self, "pub"), 403)
+        html = self.client.get("/cameras/").content.decode()
+        self.assertNotIn('class="ev-rail"', html)
+        self.assertNotIn('<div class="cam-scrub">', html)
+
+    def test_talk_and_ptz_switches(self):
+        self.guests(talk=False, ptz=False)
+        self.assertEqual(self.ROUTES["camera_talk_prepare"](self, "pub"), 404)
+        self.assertEqual(self._ptz("pub"), 403)
+        self.refresh_talkback.assert_not_called()
+        self.ptz_goto_preset.assert_not_called()
+        resp = self.client.get("/cameras/")
+        stream = resp.context["sites"][0]["streams"][0]
+        self.assertEqual((stream["talk_stream"], stream["is_ptz"], stream["ptz_presets"]), ("", False, 0))
+        popup = self.client.get("/cameras/popup/pub/").content.decode()
+        self.assertNotIn("data-talk-stream", popup)
+        self.assertNotIn('class="cam-talk"', popup)
+        self.assertIn('class="cam-spk"', popup)
+        self.guests()
+        self.assertIn('data-talk-stream="porch_talk"', self.client.get("/cameras/popup/pub/").content.decode())
+        self.assertEqual(self.client.get("/cameras/").context["sites"][0]["streams"][0]["is_ptz"], True)
+
+
+class GuestEventWindowTests(GuestTestCase):
+    def setUp(self):
+        super().setUp()
+        _ev("new", ["person"], minutes_ago=10, camera_id="pub", thumb=b"jpg")
+        _ev("old", ["person"], minutes_ago=120, camera_id="pub", thumb=b"jpg")
+        self.client_mock = MagicMock()
+        self.client_mock.get_camera_snapshot.return_value = None
+        for target, kw in (
+            ("cameras.views.events.run", {"side_effect": lambda cam, fn, **kw: fn(self.client_mock)}),
+            ("cameras.views.clips.get", {"return_value": None}),
+        ):
+            p = patch(target, **kw)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def ids(self):
+        return [e["id"] for e in self.client.get("/cameras/events/").json()["events"]]
+
+    def since(self, minutes_ago):
+        local = dj_tz.localtime(dj_tz.now() - timedelta(minutes=minutes_ago)).replace(tzinfo=None)
+        return self.guests(events="since", events_since=local.isoformat())
+
+    def test_last_24_hours(self):
+        self.guests(events="24h")
+        self.assertEqual(self.ids(), ["new", "old"])
+        day_ago = int(time.time()) - 25 * 3600
+        self.assertEqual(self.client.get(f"/cameras/snapshot/pub/?ts={day_ago}").status_code, 403)
+        self.assertEqual(self.client.get(f"/cameras/clip/pub/?start={day_ago}").status_code, 403)
+        self.assertEqual(self.client.get(f"/cameras/snapshot/pub/?ts={day_ago + 7200}").status_code, 404)
+        resp = self.client.get("/cameras/")
+        self.assertAlmostEqual(resp.context["events_from"] / 1000, time.time() - 24 * 3600, delta=60)
+
+    def test_since(self):
+        self.since(60)
+        self.assertEqual(self.ids(), ["new"])
+        self.assertEqual(self.client.get("/cameras/events/new/thumb/").status_code, 200)
+        self.assertEqual(self.client.get("/cameras/events/old/thumb/").status_code, 404)
+        before = int(time.time()) - 90 * 60
+        after = int(time.time()) - 30 * 60
+        self.assertEqual(self.client.get(f"/cameras/clip/pub/?start={before}").status_code, 403)
+        self.assertEqual(self.client.get(f"/cameras/clip/pub/?start={after}").status_code, 404)
+        self.assertEqual(self.client.get(f"/cameras/snapshot/pub/?ts={before}").status_code, 403)
+        self.assertEqual(self.client.get(f"/cameras/snapshot/pub/?ts={after}").status_code, 404)
+        self.assertAlmostEqual(self.client.get("/cameras/").context["events_from"] / 1000,
+                               time.time() - 3600, delta=60)
+
+    def test_admins_see_everything_recorded(self):
+        self.since(60)
+        self.is_admin = True
+        self.assertEqual(self.ids(), ["new", "old"])
+        self.assertEqual(self.client.get("/cameras/events/old/thumb/").status_code, 200)
+        old = int(time.time()) - 3 * 24 * 3600
+        self.assertEqual(self.client.get(f"/cameras/clip/pub/?start={old}").status_code, 404)
+        self.assertEqual(self.client.get(f"/cameras/clip/priv/?start={old}").status_code, 404)
+        self.assertEqual(self.client.get("/cameras/").context["events_from"], 0)
+
+
+class GuestPopupTests(GuestTestCase):
+    def setUp(self):
+        super().setUp()
+        p = patch("bdh_sdk.alerts.push")
+        self.push = p.start()
+        self.addCleanup(p.stop)
+
+    def test_audience(self):
+        admins_only = popups_mod.camera_admins_only
+        self.assertEqual((admins_only("pub"), admins_only("priv")), (False, True))
+        popups_mod.save({"cameras": {
+            "pub": {"kinds": ["person"], "audience": "admins"},
+            "shed": {"kinds": ["person"], "audience": "everyone"},
+            "priv": {"kinds": ["person"], "audience": "everyone"}}})
+        self.assertEqual(popups_mod.stored()["cameras"]["pub"]["audience"], "admins")
+        self.assertNotIn("audience", popups_mod.stored()["cameras"]["shed"])
+        # Cameras guests can't see never pop up for them, whatever was picked.
+        self.assertEqual([admins_only(c) for c in ("pub", "shed", "priv")], [True, False, True])
+
+    def test_push_sets_admins_only(self):
+        event = MagicMock(topic="ha/state/lock.gate", data={"entity_id": "lock.gate", "new": "unlocked",
+                                                            "attributes": {"friendly_name": "Gate"}})
+        popups_mod._push(event, {"entity_id": "lock.gate"}, "pub")
+        popups_mod._push(event, {"entity_id": "lock.gate"}, "priv")
+        self.assertEqual([(c.args[0].key, c.args[0].admins_only) for c in self.push.call_args_list],
+                         [("doorbell:pub", False), ("doorbell:priv", True)])
+
+    def test_settings_lock_hidden_cameras(self):
+        self.is_admin = True
+        page = self.client.get("/cameras/settings/popups/").context["page"]
+        hidden = {c["id"]: c["guest_hidden"] for s in page["sites"] for c in s["cameras"]}
+        self.assertEqual(hidden, {"pub": False, "shed": False, "priv": True})
+
+
+class GuestSettingsViewTests(GuestTestCase):
+    URL = "/cameras/settings/guests/"
+
+    def setUp(self):
+        super().setUp()
+        self.is_admin = True
+        p = patch("cameras.views._nvr_rows", return_value=[
+            {"id": "1", "name": "Home", "host": "10.0.0.1", "username": "", "has_api_key": True,
+             "has_password": False}])
+        p.start()
+        self.addCleanup(p.stop)
+
+    def post(self, body):
+        return self.client.post(self.URL, json.dumps(body), content_type="application/json")
+
+    def test_page_shows_the_rules_in_effect(self):
+        page = self.client.get(self.URL).context["page"]
+        self.assertEqual([(s["id"], s["default"], [(c["id"], c["visible"]) for c in s["cameras"]])
+                          for s in page["sites"]],
+                         [("1", "visible", [("pub", True), ("shed", True)]), ("2", "hidden", [("priv", False)])])
+        self.assertEqual((page["config"]["talk"], page["config"]["events"]), (True, "off"))
+
+    def test_save(self):
+        resp = self.post({"nvrs": {"1": {"default": "visible", "cameras": {"shed": "hidden"}},
+                                   "2": {"default": "hidden"}},
+                          "talk": False, "events": "since", "events_since": "2026-05-24T18:00"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["events_since"], "2026-05-24T18:00")
+        cfg = policy_mod.stored()
+        self.assertEqual((cfg["talk"], cfg["ptz"], cfg["events"]), (False, True, "since"))
+        self.assertEqual(policy_mod.visible_camera_ids(), {"pub"})
+        page = self.client.get(self.URL).context["page"]
+        self.assertEqual(page["sites"][0]["cameras"][1], {"id": "shed", "name": "Shed", "visible": False})
+        self.assertEqual(page["config"]["events_since"], "2026-05-24T18:00")
+
+    def test_rejects_junk_and_guests(self):
+        self.assertEqual(self.client.post(self.URL, "{nope", content_type="application/json").status_code, 400)
+        self.assertIsNone(policy_mod.stored())
+        self.is_admin = False
+        self.assertEqual(self.client.get(self.URL).status_code, 404)
+        self.assertEqual(self.post({"nvrs": {}}).status_code, 404)
+        self.assertIsNone(policy_mod.stored())
+
+    def test_main_settings_summary(self):
+        self.guests(ptz=False, events="24h")
+        resp = self.client.get("/cameras/settings/")
+        self.assertEqual(resp.context["page"]["guests"],
+                         {"visible": 2, "cameras": 3, "talk": True, "ptz": False, "events": "24h", "since": ""})
+        self.assertContains(resp, 'href="/cameras/settings/guests/"')
