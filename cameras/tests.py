@@ -5,7 +5,8 @@ import urllib.parse
 from django.test import SimpleTestCase, TestCase, Client, override_settings, tag
 from django.contrib.staticfiles.testing import StaticLiveServerTestCase
 from django.contrib.auth.models import User
-from unittest.mock import patch, MagicMock, call
+from django.utils.functional import classproperty
+from unittest.mock import ANY, AsyncMock, patch, MagicMock, call
 from .views import get_go2rtc_streams, _register_streams_with_go2rtc
 from django.core.cache import cache as django_cache
 from .protect_api import (
@@ -1616,7 +1617,10 @@ class TalkPrepareViewTests(TestCase):
         mock_refresh.side_effect = self._camera
         response = self.client.post(self.URL + '?camera=door')
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {'stream': 'front_door_talk', 'port': 11900})
+        body = response.json()
+        self.assertEqual(body['port'], 80)
+        from .routing import redeem_talk
+        self.assertEqual(redeem_talk(body['stream']), 'front_door_talk')
         source = 'talkback:rtp://192.168.1.135:7004?codec=opus&rate=24000'
         self.assertEqual(self.wanted['http://h:11900']['front_door_talk'], source)
         self._sync_streams.assert_called_once_with('http://h:11900', {'front_door_talk': source})
@@ -1639,12 +1643,41 @@ class TalkPrepareViewTests(TestCase):
         self.client.force_login(user)
         self.assertEqual(self.client.post(self.URL + '?camera=cabin').status_code, 200)
 
-    @patch('cameras.views.config.aec_url', return_value='http://h:11911')
     @patch('cameras.views.refresh_talkback')
-    def test_talk_goes_through_echo_canceller(self, mock_refresh, mock_aec):
+    def test_port_is_the_pages(self, mock_refresh):
+        """The kiosk talks to the app's own port, not go2rtc's or aec's."""
         mock_refresh.side_effect = self._camera
-        response = self.client.post(self.URL + '?camera=door')
-        self.assertEqual(response.json(), {'stream': 'front_door_talk', 'port': 11911})
+        for host, port in (('testserver:9105', 9105), ('testserver', 80)):
+            with self.subTest(host=host):
+                response = self.client.post(self.URL + '?camera=door', HTTP_HOST=host)
+                self.assertEqual(response.json()['port'], port)
+
+
+class Go2rtcScriptTests(TestCase):
+    """go2rtc's player is served by the app (browsers can't reach go2rtc)."""
+
+    def setUp(self):
+        from . import views
+        views._scripts.clear()
+        self.addCleanup(views._scripts.clear)
+
+    @patch('cameras.views.config.go2rtc_url', return_value='http://127.0.0.1:11900')
+    @patch('cameras.views.urllib.request.urlopen')
+    def test_serves_and_caches_the_player(self, mock_open, _url):
+        mock_open.return_value.__enter__.return_value.read.return_value = b'export class VideoRTC {}'
+        for _ in range(2):
+            resp = self.client.get('/cameras/go2rtc/video-rtc.js')
+            self.assertEqual((resp.status_code, resp.content), (200, b'export class VideoRTC {}'))
+            self.assertEqual(resp['Content-Type'], 'application/javascript')
+        mock_open.assert_called_once_with('http://127.0.0.1:11900/video-rtc.js', timeout=5)
+
+    @patch('cameras.views.urllib.request.urlopen')
+    def test_only_the_player(self, mock_open):
+        for name in ('api', 'index.html', 'stream.html'):
+            self.assertEqual(self.client.get(f'/cameras/go2rtc/{name}').status_code, 404)
+        mock_open.side_effect = urllib.error.URLError('down')
+        self.assertEqual(self.client.get('/cameras/go2rtc/video-stream.js').status_code, 502)
+        mock_open.assert_called_once()
 
 
 class EchoCancelStreamTests(SimpleTestCase):
@@ -1954,12 +1987,155 @@ def _go2rtc_available():
         return False
 
 
+class WebsocketFront:
+    """A port in front of the live server that also serves the app's websockets.
+
+    The live server is WSGI only, but pages reach go2rtc through the app's
+    websocket routes (cameras.routing). Requests asking for a websocket go to
+    an in-thread websockets server running those routes (behind channels'
+    auth, like the hub); everything else is piped to the live server. In this
+    process, so tests' patches apply.
+
+    ``connections_override`` is the live server's: with SQLite in memory, a
+    second connection to the shared database fails with "table is locked"
+    while the live server writes, so the websockets' DB calls (channels'
+    session lookup, the app's checks) use the live server's connection too.
+    """
+
+    def __init__(self, backend_port, connections_override=None):
+        import asyncio
+        import threading
+        self.backend_port = backend_port
+        self.connections_override = connections_override or {}
+        self.loop = asyncio.new_event_loop()
+        ready = threading.Event()
+        self.thread = threading.Thread(target=self._run, args=(ready,), daemon=True)
+        self.thread.start()
+        ready.wait(10)
+
+    def _run(self, ready):
+        import asyncio
+        from websockets.asyncio.server import serve
+        asyncio.set_event_loop(self.loop)
+
+        async def start():
+            from channels.db import database_sync_to_async
+            from django.db import connections
+
+            # The same executor thread every later database_sync_to_async
+            # call from this loop runs in.
+            def share():
+                for alias, conn in self.connections_override.items():
+                    connections[alias] = conn
+            await database_sync_to_async(share)()
+            self.ws = await serve(self._websocket, "127.0.0.1", 0)
+            self.front = await asyncio.start_server(self._connection, "127.0.0.1", 0)
+            self.port = self.front.sockets[0].getsockname()[1]
+            self.ws_port = list(self.ws.sockets)[0].getsockname()[1]
+        self.loop.run_until_complete(start())
+        ready.set()
+        self.loop.run_forever()
+
+    def stop(self):
+        async def close():
+            self.front.close()
+            self.ws.close()
+        import asyncio
+        asyncio.run_coroutine_threadsafe(close(), self.loop).result(10)
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join(10)
+
+    async def _connection(self, reader, writer):
+        import asyncio
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError):
+            writer.close()
+            return
+        port = self.ws_port if b"upgrade: websocket" in head.lower() else self.backend_port
+        try:
+            up_reader, up_writer = await asyncio.open_connection("127.0.0.1", port)
+        except OSError:
+            writer.close()
+            return
+        up_writer.write(head)
+
+        async def pipe(src, dst):
+            try:
+                while data := await src.read(65536):
+                    dst.write(data)
+                    await dst.drain()
+            except (ConnectionError, asyncio.CancelledError):
+                pass
+            finally:
+                try:
+                    dst.close()
+                except Exception:
+                    pass
+        await asyncio.gather(pipe(reader, up_writer), pipe(up_reader, writer))
+
+    async def _websocket(self, conn):
+        """Run the matching app route as ASGI over the websockets connection."""
+        import asyncio
+        from channels.auth import AuthMiddlewareStack
+        from channels.routing import URLRouter
+        from websockets.exceptions import ConnectionClosed
+        from .routing import websocket_urlpatterns
+
+        path, _, query = conn.request.path.partition("?")
+        scope = {"type": "websocket", "path": path, "raw_path": path.encode(),
+                 "query_string": query.encode(), "headers": [
+                     (k.lower().encode("latin1"), v.encode("latin1")) for k, v in conn.request.headers.raw_items()],
+                 "subprotocols": [], "client": ("127.0.0.1", 0), "server": ("127.0.0.1", self.port)}
+        inbox = asyncio.Queue()
+        await inbox.put({"type": "websocket.connect"})
+
+        async def pump():
+            try:
+                async for message in conn:
+                    key = "text" if isinstance(message, str) else "bytes"
+                    await inbox.put({"type": "websocket.receive", key: message})
+            except ConnectionClosed:
+                pass
+            await inbox.put({"type": "websocket.disconnect", "code": conn.close_code or 1000})
+
+        async def send(message):
+            if message["type"] == "websocket.send":
+                await conn.send(message["text"] if message.get("text") is not None else message["bytes"])
+            elif message["type"] == "websocket.close":
+                await conn.close(message.get("code", 1000))
+
+        app = AuthMiddlewareStack(URLRouter(websocket_urlpatterns))
+        pumping = asyncio.ensure_future(pump())
+        try:
+            await app(scope, inbox.get, send)
+        except (ValueError, ConnectionClosed):  # no route / client gone
+            pass
+        finally:
+            pumping.cancel()
+            await conn.close()
+
+
+class WebsocketLiveServerTestCase(StaticLiveServerTestCase):
+    """The live server, with the app's websockets (see :class:`WebsocketFront`)."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.ws_front = WebsocketFront(cls.server_thread.port, cls.server_thread.connections_override)
+        cls.addClassCleanup(cls.ws_front.stop)
+
+    @classproperty
+    def live_server_url(cls):
+        return f"http://{cls.host}:{cls.ws_front.port}"
+
+
 @tag('selenium')
 @override_settings(
     GO2RTC_URL=GO2RTC_CI_URL,
     **protect_settings([]),
 )
-class CameraStreamSeleniumTests(StaticLiveServerTestCase):
+class CameraStreamSeleniumTests(WebsocketLiveServerTestCase):
     """Selenium smoke tests verifying video-stream elements load via go2rtc.
 
     Requires go2rtc running on localhost:1984 (provided in CI by Docker
@@ -2261,6 +2437,7 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
             patch('cameras.views._cached_poster', return_value=None),
             patch('cameras.views.refresh_talkback', return_value=dict(cam, talkback=talkback)),
             patch('cameras.views._sync_streams'),
+            patch('cameras.routing.issue_talk', return_value='tk1'),
         ):
             p.start()
             self.addCleanup(p.stop)
@@ -2286,6 +2463,10 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
         except Exception:
             self.skipTest('Browser did not enter fullscreen')
         return card
+
+    def _page_port(self):
+        """Talk goes to the page's own port (the app relays it to go2rtc)."""
+        return urllib.parse.urlsplit(self.live_server_url).port
 
     def _shown(self, card, selector):
         return self.driver.execute_script(
@@ -2319,7 +2500,7 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
         WebDriverWait(self.driver, 5).until(
             lambda d: d.execute_script("return window.__talkCalls.length > 0"))
         self.assertEqual(self.driver.execute_script("return window.__talkCalls"),
-                         [['start', 'test_cam_talk', 1984]])
+                         [['start', 'tk1', self._page_port()]])
         self.assertEqual(spk.get_attribute('aria-pressed'), 'true')
         self.assertEqual(card.get_attribute('data-talk'), 'connecting')
 
@@ -2404,7 +2585,7 @@ class CameraStreamSeleniumTests(StaticLiveServerTestCase):
         WebDriverWait(self.driver, 5).until(
             lambda d: d.execute_script("return window.__talkCalls.length > 0"))
         self.assertEqual(self.driver.execute_script("return window.__talkCalls"),
-                         [['start', 'test_cam_talk', 1984]])
+                         [['start', 'tk1', self._page_port()]])
 
         # What MainActivity.talkJs does from the top frame
         self.driver.switch_to.default_content()
@@ -4305,6 +4486,7 @@ class GuestEndpointTests(GuestTestCase):
     """
     EXEMPT = {
         "camera_rtc_diag", "camera_rtc_events",  # browser diagnostics posted to the log
+        "camera_go2rtc_script",  # go2rtc's player code
     }
     SETTINGS = {"cameras_settings", "cameras_popups", "cameras_guests", "cameras_popup_entities",
                 "cameras_nvrs", "cameras_nvr_save", "cameras_nvr_remove", "cameras_nvr_test"}
@@ -4320,6 +4502,9 @@ class GuestEndpointTests(GuestTestCase):
             ("cameras.views._sync_streams", {}),
             ("cameras.frames.live_get", {"return_value": b"img"}),
             ("cameras.views.clips.get", {"return_value": None}),
+            ("cameras.routing.wsrelay.relay", {"new_callable": AsyncMock, "return_value": True}),
+            ("cameras.routing.config.go2rtc_url", {"return_value": "http://127.0.0.1:11900"}),
+            ("cameras.routing.config.aec_url", {"return_value": ""}),
         ):
             p = patch(target, **kw)
             setattr(self, target.rsplit(".", 1)[1], p.start())
@@ -4339,6 +4524,39 @@ class GuestEndpointTests(GuestTestCase):
             return resp.status_code
         return 200 if camera_id in [e["camera_id"] for e in resp.json()["events"]] else 404
 
+    def _websocket(self, route, src):
+        """Open one of cameras.routing's websockets: 200 if relayed, else its close code."""
+        from asgiref.sync import async_to_sync
+        from django.contrib.auth.models import AnonymousUser
+        sent, inbox = [], [{"type": "websocket.connect"}]
+
+        async def receive():
+            return inbox.pop(0) if inbox else {"type": "websocket.disconnect", "code": 1000}
+
+        async def send(message):
+            sent.append(message)
+
+        calls = self.relay.call_count
+        scope = {"type": "websocket", "path": "/", "user": AnonymousUser(),
+                 "query_string": urllib.parse.urlencode({"src": src}).encode()}
+        async_to_sync(route)(scope, receive, send)
+        if self.relay.call_count > calls:
+            return 200
+        return 403 if sent == [{"type": "websocket.close", "code": 4403}] else sent
+
+    STREAMS = {"pub": "porch", "priv": "cabin_door"}
+
+    def _watch(self, camera_id):
+        from .routing import watch
+        return self._websocket(watch, self.STREAMS[camera_id])
+
+    def _talk(self, camera_id):
+        from .routing import talk
+        resp = self.client.post(f"/cameras/api/talk/prepare/?camera={camera_id}")
+        if resp.status_code != 200:
+            return resp.status_code
+        return self._websocket(talk, resp.json()["stream"])
+
     def _ptz(self, camera_id):
         return self.client.post("/cameras/ptz/goto/", json.dumps({"camera_id": camera_id, "slot": 0}),
                                 content_type="application/json").status_code
@@ -4355,12 +4573,56 @@ class GuestEndpointTests(GuestTestCase):
         "camera_talk_prepare": lambda self, cid: self.client.post(
             f"/cameras/api/talk/prepare/?camera={cid}").status_code,
         "ptz_goto": _ptz,
+        "camera_watch_ws": _watch,
+        "camera_talk_ws": _talk,
     }
 
     def test_every_route_is_classified(self):
+        from .routing import websocket_urlpatterns
         from .urls import urlpatterns
-        names = {p.name for p in urlpatterns}
+        names = {p.name for p in urlpatterns + websocket_urlpatterns}
         self.assertEqual(names - set(self.ROUTES) - self.EXEMPT - self.SETTINGS, set())
+
+    def test_watch_relays_only_the_viewers_streams(self):
+        """go2rtc gets just ``src``, on loopback; other streams of hidden cameras and
+        talk streams are refused."""
+        from .routing import watch
+        self.assertEqual(self._websocket(watch, "porch_low"), 200)
+        self.relay.assert_called_with(ANY, ANY, "ws://127.0.0.1:11900/api/ws?src=porch_low")
+        for src in ("cabin_door_low", "porch_talk", "unknown", "", "porch&src=cabin_door"):
+            with self.subTest(src=src):
+                self.assertEqual(self._websocket(watch, src), 403)
+        self.is_admin = True
+        self.assertEqual(self._websocket(watch, "cabin_door_low"), 200)
+
+    def test_talk_tokens_are_single_use(self):
+        from . import routing
+        token = self.client.post("/cameras/api/talk/prepare/?camera=pub").json()["stream"]
+        self.assertNotIn("porch", token)
+        self.assertEqual(self._websocket(routing.talk, token), 200)
+        self.relay.assert_called_with(ANY, ANY, "ws://127.0.0.1:11900/api/talk?src=porch_talk")
+        self.assertEqual(self._websocket(routing.talk, token), 403)
+        self.assertEqual(self._websocket(routing.talk, "porch_talk"), 403)
+        token = routing.issue_talk("porch_talk")
+        routing._talks[token] = ("porch_talk", time.monotonic() - routing.TALK_TTL - 1)
+        self.assertEqual(self._websocket(routing.talk, token), 403)
+
+    def test_talk_goes_through_echo_canceller(self):
+        from .routing import talk
+        self.aec_url.return_value = "http://127.0.0.1:12200"
+        token = self.client.post("/cameras/api/talk/prepare/?camera=pub").json()["stream"]
+        self.assertEqual(self._websocket(talk, token), 200)
+        self.relay.assert_called_with(ANY, ANY, "ws://127.0.0.1:12200/api/talk?src=porch_talk")
+
+    def test_pages_use_the_relay(self):
+        """Browsers never get go2rtc's address."""
+        self.is_admin = True
+        for url in ("/cameras/", "/cameras/popup/pub/"):
+            with self.subTest(url=url):
+                html = self.client.get(url).content.decode()
+                self.assertIn("/cameras/api/ws", html)
+                self.assertIn("/cameras/go2rtc/video-stream.js", html)
+                self.assertNotIn("11900", html)
 
     def test_guests_only_reach_cameras_they_see(self):
         for name, ask in self.ROUTES.items():
@@ -4368,7 +4630,8 @@ class GuestEndpointTests(GuestTestCase):
                 self.assertEqual(ask(self, "pub"), 200, "visible camera")
                 self.assertIn(ask(self, "priv"), (403, 404), "hidden camera")
         self.ptz_goto_preset.assert_called_once_with("pub", 0)
-        self.assertEqual([c.args[0] for c in self.refresh_talkback.call_args_list], ["pub"])
+        # Once from camera_talk_prepare, once from camera_talk_ws's own prepare.
+        self.assertEqual({c.args[0] for c in self.refresh_talkback.call_args_list}, {"pub"})
 
     def test_admins_reach_every_camera(self):
         self.is_admin = True
@@ -4396,6 +4659,7 @@ class GuestEndpointTests(GuestTestCase):
     def test_talk_and_ptz_switches(self):
         self.guests(talk=False, ptz=False)
         self.assertEqual(self.ROUTES["camera_talk_prepare"](self, "pub"), 404)
+        self.assertEqual(self._talk("pub"), 404)
         self.assertEqual(self._ptz("pub"), 403)
         self.refresh_talkback.assert_not_called()
         self.ptz_goto_preset.assert_not_called()

@@ -101,8 +101,8 @@ repainting animations stall WebRTC video decode. See README "Display performance
     applyAudio();
 </script>
 <script type="module">
-    const base = `http://${window.location.hostname}:{{ go2rtc_port }}`;
-    await import(`${base}/video-stream.js`);
+    const watchUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}{{ watch_path }}`;
+    await import('{% url "camera_go2rtc_script" "video-stream.js" %}');
     await customElements.whenDefined('video-stream');
     const WEBRTC_TIMEOUT = 6000;
     // Self-healing: a popup can stay open for minutes, and the stream may
@@ -158,7 +158,7 @@ repainting animations stall WebRTC video decode. See README "Display performance
     function start(el, mode) {
         el.background = true;
         el.mode = mode;
-        el.src = `${base}/api/ws?src=${encodeURIComponent(el.dataset.streamName)}`;
+        el.src = `${watchUrl}?src=${encodeURIComponent(el.dataset.streamName)}`;
         const v = el.video;
         let live = false;
         let lastTime = -1;
