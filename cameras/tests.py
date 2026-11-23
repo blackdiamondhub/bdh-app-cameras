@@ -1995,12 +1995,18 @@ class WebsocketFront:
     an in-thread websockets server running those routes (behind channels'
     auth, like the hub); everything else is piped to the live server. In this
     process, so tests' patches apply.
+
+    ``connections_override`` is the live server's: with SQLite in memory, a
+    second connection to the shared database fails with "table is locked"
+    while the live server writes, so the websockets' DB calls (channels'
+    session lookup, the app's checks) use the live server's connection too.
     """
 
-    def __init__(self, backend_port):
+    def __init__(self, backend_port, connections_override=None):
         import asyncio
         import threading
         self.backend_port = backend_port
+        self.connections_override = connections_override or {}
         self.loop = asyncio.new_event_loop()
         ready = threading.Event()
         self.thread = threading.Thread(target=self._run, args=(ready,), daemon=True)
@@ -2013,6 +2019,15 @@ class WebsocketFront:
         asyncio.set_event_loop(self.loop)
 
         async def start():
+            from channels.db import database_sync_to_async
+            from django.db import connections
+
+            # The same executor thread every later database_sync_to_async
+            # call from this loop runs in.
+            def share():
+                for alias, conn in self.connections_override.items():
+                    connections[alias] = conn
+            await database_sync_to_async(share)()
             self.ws = await serve(self._websocket, "127.0.0.1", 0)
             self.front = await asyncio.start_server(self._connection, "127.0.0.1", 0)
             self.port = self.front.sockets[0].getsockname()[1]
@@ -2107,7 +2122,7 @@ class WebsocketLiveServerTestCase(StaticLiveServerTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        cls.ws_front = WebsocketFront(cls.server_thread.port)
+        cls.ws_front = WebsocketFront(cls.server_thread.port, cls.server_thread.connections_override)
         cls.addClassCleanup(cls.ws_front.stop)
 
     @classproperty
