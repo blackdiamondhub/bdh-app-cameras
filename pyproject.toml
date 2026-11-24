@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.urls]
-Source = "https://github.com/blackdiamondlodge/bdh-app-cameras"
+Source = "https://github.com/blackdiamondhub/bdh-app-cameras"
 
 [project.entry-points."blackdiamondhub.plugins"]
 cameras = "cameras.plugin:spec"
