@@ -1,14 +1,14 @@
 # bdh-app-cameras
 
 Black Diamond Hub app: live camera feeds via go2rtc and UniFi Protect. Moved out of
-[BlackDiamondHub](https://github.com/blackdiamondlodge/BlackDiamondHub) and
+[BlackDiamondHub](https://github.com/blackdiamondhub/BlackDiamondHub) and
 installed into the hub through the `blackdiamondhub.plugins` entry point
-(see [bdh-sdk](https://github.com/blackdiamondlodge/bdh-sdk)).
+(see [bdh-sdk](https://github.com/blackdiamondhub/bdh-sdk)).
 
 Page: `/cameras/`.
 
 Since 2.0.0 (`hub_api` 2) the app runs in its own container under
-[bdh-supervisor](https://github.com/blackdiamondlodge/bdh-supervisor), with its
+[bdh-supervisor](https://github.com/blackdiamondhub/bdh-supervisor), with its
 own SQLite database at `/data`. It reaches the hub only through the broker RPC
 (settings, alerts, Home Assistant state, events). Manifest (`cameras/plugin.py`):
 
@@ -175,5 +175,5 @@ Protect account, waits for `/_bdh/health` and reports RSS/PSS in the job summary
 
 To release, bump `version` in `pyproject.toml`. When that lands on `main`, `release.yml` tags it
 and publishes the wheel, `bdh-lock.txt` and `bdh-app.json`. The catalog's builder
-(`blackdiamondlodge/bdh-app-catalog`, `build.yml`) then builds, attests and pushes
-`ghcr.io/blackdiamondlodge/bdh-app-cameras` and adds the version to the catalog.
+(`blackdiamondhub/bdh-app-catalog`, `build.yml`) then builds, attests and pushes
+`ghcr.io/blackdiamondhub/bdh-app-cameras` and adds the version to the catalog.
