@@ -3594,6 +3594,20 @@ class EventTemplateTests(TestCase):
 
     @patch("cameras.views._register_streams_with_go2rtc")
     @patch("cameras.views.get_protect_cameras")
+    def test_every_video_has_a_poster(self, mock_cameras, _):
+        # Android WebView (the kiosk) paints a big grey play triangle on a poster-less
+        # <video> until its first frame, e.g. while a scrubbed replay loads.
+        import re
+        mock_cameras.return_value = self.CAMS
+        with patch("cameras.policy.is_admin", return_value=True):
+            html = Client().get("/cameras/").content.decode()
+        videos = re.findall(r'<video\s[^>]*>', html)
+        self.assertTrue(videos)
+        for tag in videos:
+            self.assertRegex(tag, r'\sposter="[^"]+"', tag)
+
+    @patch("cameras.views._register_streams_with_go2rtc")
+    @patch("cameras.views.get_protect_cameras")
     def test_admin_sees_rail_and_scrubber(self, mock_cameras, _):
         mock_cameras.return_value = self.CAMS
         with patch("cameras.policy.is_admin", return_value=True):
